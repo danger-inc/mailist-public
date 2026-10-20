@@ -1,0 +1,17 @@
+[Desktop Entry]
+Type=Application
+Name=mailist
+GenericName=E-Mail
+Comment=Schlankes Gmail-Programm im Explorer-Stil – schnell lesen, leicht löschen
+Exec=@EXEC@ %u
+Icon=mailist
+Terminal=false
+Categories=Network;Email;
+Keywords=mail;email;gmail;post;nachrichten;super+g;
+MimeType=x-scheme-handler/mailto;message/rfc822;
+StartupWMClass=de.invincible.Mailist
+Actions=compose;
+
+[Desktop Action compose]
+Name=Neue Mail
+Exec=@EXEC@ --compose
