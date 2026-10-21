@@ -12,7 +12,7 @@ if [ -d "$HOME/.config/mailist" ]; then
     [[ "${a,,}" =~ ^j ]] && rm -rf "$HOME/.config/mailist"
 fi
 # gemeinsame Bausteine nur entfernen, wenn keine andere Suite-App sie noch braucht
-if [ ! -d "$RICE/calendar" ] && [ ! -d "$RICE/music" ] && [ ! -d "$HOME/.local/share/wallist" ]; then
+if [ ! -d "$RICE/calendar" ] && [ ! -d "$RICE/music" ] && [ ! -d "$HOME/.local/share/wallist" ] && [ ! -d "$HOME/.local/share/sharist" ]; then
     rm -rf "$RICE/fonts" "$RICE/tui.py" "$RICE/glass.py" "$RICE/changelog.py" "$RICE/swipe.py" "$RICE/__pycache__"
     rmdir "$RICE" 2>/dev/null || true
 fi

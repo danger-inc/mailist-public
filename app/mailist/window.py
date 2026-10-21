@@ -252,6 +252,18 @@ class MailWindow(Gtk.ApplicationWindow):
                                                         seconds=12), False)[1])
         except Exception as e:
             print("changelog:", e)
+        try:                      # neuere Version auf GitHub? → Knopf „󰚰 v1.2.0 → v1.3.0“
+            import changelog
+
+            def has_update(latest):
+                b.add_css_class("news")
+                b.remove_css_class("off")
+                b.set_label(f"󰚰 v{version} → v{latest}")
+                b.set_tooltip_text(changelog.update_text(latest) + " · klick: changelog")
+                GLib.timeout_add(1200, lambda: (self.say(changelog.update_text(latest), seconds=12), False)[1])
+            getattr(changelog, "check_update", lambda *a: None)("mailist", version, has_update)
+        except Exception as e:
+            print("update-check:", e)
         return b
 
     @staticmethod
