@@ -42,6 +42,8 @@ class Mail:
             if p.is_multipart():
                 continue
             ctype = p.get_content_type()
+            if ctype in ("application/pgp-signature", "application/pgp-encrypted"):
+                continue                          # Signatur/Versionsteil: zeigt der Leser als Status, nicht als Anhang
             disp = (p.get_content_disposition() or "").lower()
             name = p.get_filename()
             if name or disp == "attachment":
@@ -95,14 +97,14 @@ class Mail:
 
 def _text(part):
     try:
-        return part.get_content()
+        return part.get_content().replace("\r\n", "\n")
     except Exception:
         raw = part.get_payload(decode=True) or b""
         cs = part.get_content_charset() or "utf-8"
         try:
-            return raw.decode(cs, "replace")
+            return raw.decode(cs, "replace").replace("\r\n", "\n")
         except LookupError:
-            return raw.decode("utf-8", "replace")
+            return raw.decode("utf-8", "replace").replace("\r\n", "\n")
 
 
 def plain_segments(text):

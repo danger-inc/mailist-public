@@ -183,6 +183,31 @@ window.ml-compose .ml-field { color: @secondary; min-width: 58px; }
 .ml-attrow { padding: 2px 0; }
 window.ml-dialog { background-color: @background; }
 window.ml-dialog.glass { background-color: alpha(@background, 0.75); }
+.ml-fmtbar { padding: 4px 0 2px 0; border-top: 1px solid alpha(@primary, 0.18); margin-top: 2px; }
+button.ml-fmt { background: none; border: none; box-shadow: none; min-height: 0; min-width: 0; padding: 2px 6px;
+    border-radius: 4px; }
+window.ml button.ml-fmt label { font-size: 16px; color: alpha(@foreground, 0.7); }
+button.ml-fmt:hover { background-color: alpha(@primary, 0.16); }
+window.ml button.ml-fmt:hover label { color: @foreground; }
+button.ml-fmt.on { background-color: alpha(@primary, 0.26); }
+window.ml button.ml-fmt.on label { color: @primary; }
+separator.ml-fmtsep { background-color: alpha(@primary, 0.25); min-width: 1px; margin: 5px 5px; }
+button.ml-swatch { padding: 3px; min-width: 0; min-height: 0; background: none; box-shadow: none;
+    border: 1px solid alpha(@foreground, 0.2); border-radius: 4px; }
+button.ml-swatch:hover { border-color: @primary; background-color: alpha(@primary, 0.16); }
+.ml-accts { margin-bottom: 2px; }
+button.ml-acct { background: none; border: none; box-shadow: none; border-radius: 4px; padding: 2px 6px; min-height: 0; }
+button.ml-acct:hover { background-color: alpha(@primary, 0.12); }
+button.ml-acct.active { background-color: alpha(@primary, 0.22); }
+window.ml .ml-count.warn { background-color: @tertiary; color: @background; }
+window.ml .ml-acctname { color: @foreground; }
+window.ml .ml-acctname.cur { color: @primary; font-weight: bold; }
+window.ml .ml-warn { color: @tertiary; }
+window.ml button.ml-pgp { color: alpha(@foreground, 0.55); }
+window.ml button.ml-pgp:disabled { color: alpha(@foreground, 0.25); }
+window.ml button.ml-pgp.on { color: @primary; background-color: alpha(@primary, 0.18); }
+window.ml .ml-field { min-width: 64px; }
+window.ml expander title label { color: @secondary; }
 """
 
 
@@ -202,8 +227,8 @@ class Mailist(Gtk.Application):
         self.daemon = False
         self.intent = None           # ("compose", mailto) | ("toggle",) beim ersten Start
         self._held = False
-        self.store = None
-        self.syncer = None
+        self.accounts = {}           # id → accounts.Account
+        self.acct = None             # das gerade gezeigte Konto
         self._timer = None
         self.notified = set()
         self.state = "idle"          # idle | busy | offline | expired | noauth
@@ -222,6 +247,83 @@ class Mailist(Gtk.Application):
     def pref(self, key, default=None):
         return self.prefs.get(key, default)
 
+    # ---------------- Konten
+    @property
+    def store(self):
+        return self.acct.store if self.acct else None
+
+    @property
+    def syncer(self):
+        return self.acct.syncer if self.acct else None
+
+    def apply_security(self):
+        """Sicherheits-Schalter aus den Einstellungen an die Bausteine weitergeben."""
+        import imapmail, vault
+        vault.use_keyring = bool(self.pref("sec_keyring", True))
+        imapmail.security["require_tls"] = bool(self.pref("sec_require_tls", True))
+        imapmail.security["verify_cert"] = bool(self.pref("sec_verify_cert", True))
+
+    def load_accounts(self):
+        import accounts
+        d = accounts.load()
+        limit = int(self.pref("sync_limit", 2000))
+        for conf in d["list"]:
+            if conf["id"] not in self.accounts:
+                self.accounts[conf["id"]] = accounts.Account(conf, self._event, limit)
+        for aid in [a for a in self.accounts if a not in {c["id"] for c in d["list"]}]:
+            self.accounts.pop(aid)
+        self.acct = self.accounts.get(d.get("current")) or next(iter(self.accounts.values()))
+
+    def save_accounts(self):
+        import accounts
+        accounts.save({"current": self.acct.id if self.acct else None,
+                       "list": [a.conf for a in self.accounts.values()]})
+
+    def add_account(self, conf, switch=True):
+        import accounts
+        conf.setdefault("id", accounts.new_id())
+        acc = accounts.Account(conf, self._event, int(self.pref("sync_limit", 2000)))
+        self.accounts[conf["id"]] = acc
+        if switch:
+            self.switch_account(conf["id"])
+        self.save_accounts()
+        acc.syncer.request("sync")
+        return acc
+
+    def remove_account(self, aid):
+        import accounts
+        acc = self.accounts.get(aid)
+        if not acc:
+            return
+        acc.remove_data()
+        self.accounts.pop(aid)
+        if not self.accounts:            # ganz ohne Konto geht nichts: leerer Gmail-Platz wie beim ersten Start
+            self.accounts["main"] = accounts.Account({"id": "main", "kind": "gmail", "name": "gmail"}, self._event,
+                                                     int(self.pref("sync_limit", 2000)))
+        if self.acct is acc:
+            self.acct = next(iter(self.accounts.values()))
+            if self.win:
+                self.win.switch_account()
+        self.save_accounts()
+        if self.win:
+            self.win.build_side()
+
+    def switch_account(self, aid):
+        if aid not in self.accounts or (self.acct and self.acct.id == aid):
+            return
+        self.acct = self.accounts[aid]
+        self.save_accounts()
+        if self.win:
+            self.win.switch_account()
+            self.win.sync_state(self.acct.state)
+        if time.time() - int(self.acct.store.get("synced", 0) or 0) > 60:
+            self.acct.syncer.request("sync")
+
+    def cycle_account(self, d=1):
+        ids = list(self.accounts)
+        if len(ids) > 1:
+            self.switch_account(ids[(ids.index(self.acct.id) + d) % len(ids)])
+
     def set_pref(self, key, value):
         self.prefs[key] = value
         self.save_prefs()
@@ -229,17 +331,18 @@ class Mailist(Gtk.Application):
     # ---------------- Start
     def do_startup(self):
         Gtk.Application.do_startup(self)
-        import tui, swipe, store
+        import tui, swipe
         tui.CSS = tui.CSS + ML_CSS + swipe.CSS
         tui.Theme.get()
-        self.store = store.Store()
-        self.syncer = store.Syncer(self.store, self._event, limit=int(self.pref("sync_limit", 2000)))
+        self.apply_security()
+        self.load_accounts()
         for name, ptype, cb in (("show", None, lambda *_: self.show()),
                                 ("toggle", None, lambda *_: self.toggle()),
                                 ("quit", None, lambda *_: self.really_quit()),
                                 ("sync", None, lambda *_: self.sync_now()),
                                 ("compose", "s", lambda a, p: self.compose(p.get_string())),
-                                ("open-mail", "s", lambda a, p: self.open_mail(p.get_string()))):
+                                ("open-mail", "s", lambda a, p: self.open_mail(p.get_string())),
+                                ("account", "s", lambda a, p: self.switch_account(p.get_string()))):
             act = Gio.SimpleAction.new(name, GLib.VariantType.new(ptype) if ptype else None)
             act.connect("activate", cb)
             self.add_action(act)
@@ -308,27 +411,54 @@ class Mailist(Gtk.Application):
         compose.ComposeWindow(self, mailto=mailto or None).present()
 
     def open_mail(self, mid):
+        aid, _, m = mid.rpartition("|")
+        if aid and aid in self.accounts:
+            self.switch_account(aid)
         self.show()
-        self.win.reveal(mid)
+        self.win.reveal(m)
 
     # ---------------- Abgleich
     def sync_now(self, quiet=False):
-        import gmail
-        if not gmail.logged_in():
-            self._set_state("noauth")
-            return
-        if gmail.expired():
-            self._set_state("expired")
-            return
-        self.syncer.request("sync")
+        order = [self.acct] + [a for a in self.accounts.values() if a is not self.acct]
+        for acc in order:
+            b = acc.backend
+            if not b.logged_in():
+                if acc is self.acct:
+                    self._set_state("noauth")
+                continue
+            if b.expired():
+                if acc is self.acct:
+                    self._set_state("expired")
+                continue
+            acc.syncer.request("sync")
 
-    def _event(self, kind, data):
-        GLib.idle_add(lambda: (self._on_event(kind, data), False)[1])
+    def _event(self, aid, kind, data):
+        GLib.idle_add(lambda: (self._on_event_for(aid, kind, data), False)[1])
 
     def _set_state(self, st, msg=None):
         self.state = st
+        if self.acct:
+            self.acct.state = st
         if self.win:
             self.win.sync_state(st, msg)
+
+    def _on_event_for(self, aid, kind, data):
+        acc = self.accounts.get(aid)
+        if acc is None:
+            return
+        if acc is self.acct:
+            return self._on_event(kind, data)
+        # anderes Konto im Hintergrund: Zustand merken, neue Mails melden, Zähler links auffrischen
+        if kind in ("offline", "expired", "auth"):
+            acc.state = {"auth": "noauth"}.get(kind, kind)
+        elif kind in ("synced", "idle"):
+            if acc.state in ("busy",):
+                acc.state = "idle"
+            if kind == "synced":
+                acc.state = "idle"
+                self.notify_new(data or [], acc)
+            if self.win:
+                self.win.build_side()
 
     def _on_event(self, kind, data):
         w = self.win
@@ -377,14 +507,15 @@ class Mailist(Gtk.Application):
             if w:
                 w.search_done(*data)
 
-    def notify_new(self, ids):
+    def notify_new(self, ids, acc=None):
         """Neue Mails melden (nicht, wenn das Fenster gerade vorn ist; nur Posteingang ohne Werbung)."""
+        acc = acc or self.acct
         if not ids or not self.pref("notify", True):
             return
-        if self.win and self.win.is_active():
+        if self.win and self.win.is_active() and acc is self.acct:
             return
-        rows = [r for r in (self.store.message(i) for i in ids if i not in self.notified) if r]
-        self.notified.update(ids)
+        rows = [r for r in (acc.store.message(i) for i in ids if (acc.id, i) not in self.notified) if r]
+        self.notified.update((acc.id, i) for i in ids)
         if not rows:
             return
         if len(rows) > 3:
@@ -396,7 +527,9 @@ class Mailist(Gtk.Application):
         for r in rows:
             n = Gio.Notification.new(r["from_name"] or r["from_addr"] or "neue Mail")
             n.set_body(r["subject"] or "(ohne betreff)")
-            n.set_default_action_and_target("app.open-mail", GLib.Variant("s", r["id"]))
+            if len(self.accounts) > 1:
+                n.set_title(f"{r['from_name'] or r['from_addr'] or 'neue Mail'} · {acc.label}")
+            n.set_default_action_and_target("app.open-mail", GLib.Variant("s", f"{acc.id}|{r['id']}"))
             n.set_icon(Gio.ThemedIcon.new("mailist"))
             self.send_notification("mailist-" + r["id"], n)
 

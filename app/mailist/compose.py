@@ -1,12 +1,14 @@
 # Neue Mail / Antworten / Weiterleiten – eigenes kleines Fenster im Suite-Stil.
 # Senden geht über die Warteschlange: offline geschrieben = gesendet, sobald wieder Netz da ist.
-import base64, email.message, email.policy, email.utils, mimetypes, os, re, urllib.parse
+import base64, email.message, email.policy, email.utils, mimetypes, os, re, threading, urllib.parse
 
 import gi
 gi.require_version("Gtk", "4.0")
 from gi.repository import Gdk, Gio, GLib, Gtk
 
 import glass
+import pgp
+import richtext
 import store as stmod
 import tui
 
@@ -34,7 +36,13 @@ def quote(mail, row):
 class ComposeWindow(Gtk.ApplicationWindow):
     def __init__(self, app, mode="new", row=None, mail=None, mailto=None):
         super().__init__(application=app, title="mailist · neue mail")
-        self.app, self.st = app, app.store
+        self.app = app
+        self.acct = app.acct
+        self.st = self.acct.store
+        self.sign = None              # None = automatisch (einstellungen), sonst vom Knopf
+        self.encrypt = None
+        self.keys = ({}, [])          # (gefundene schlüssel, fehlende adressen)
+        self._key_timer = None
         self.mode, self.row, self.mail = mode, row, mail
         self.files = []              # [(name, bytes, ctype)]
         self.thread = None
@@ -53,6 +61,11 @@ class ComposeWindow(Gtk.ApplicationWindow):
         self.title_lbl = tui.label("neue mail", "accent")
         top.append(self.title_lbl)
         top.append(tui.label("", hexpand=True))
+        self.from_btn = Gtk.Button(focus_on_click=False, tooltip_text="Absender – klicken wechselt das Konto")
+        self.from_btn.add_css_class("ml-link")
+        self.from_btn.connect("clicked", lambda *_: self._next_account())
+        self.from_btn.set_visible(len(app.accounts) > 1 and mode in ("new",))
+        top.append(self.from_btn)
         self.send_btn = tui.Button("\U000F048A  senden", self.send, tooltip="Senden (Strg+Enter)")
         self.send_btn.add_css_class("on")
         top.append(self.send_btn)
@@ -86,6 +99,16 @@ class ComposeWindow(Gtk.ApplicationWindow):
         more.append(tui.label("", hexpand=True))
         self.info = tui.label("", "ml-meta")
         more.append(self.info)
+        self.sign_btn = Gtk.Button(label="\U000F0124 signieren", focus_on_click=False)
+        self.enc_btn = Gtk.Button(label="\U000F033E verschlüsseln", focus_on_click=False)
+        for b, cb in ((self.sign_btn, self._toggle_sign), (self.enc_btn, self._toggle_enc)):
+            b.add_css_class("ml-link")
+            b.add_css_class("ml-pgp")
+            b.connect("clicked", lambda *_, cb=cb: cb())
+            more.append(b)
+        pgp_on = app.pref("pgp_on", True) and pgp.available()
+        self.sign_btn.set_visible(pgp_on)
+        self.enc_btn.set_visible(pgp_on)
         form.append(more)
         self.att_box = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, max_children_per_line=5, row_spacing=4,
                                    column_spacing=4)
@@ -94,6 +117,8 @@ class ComposeWindow(Gtk.ApplicationWindow):
         self.body = Gtk.TextView(wrap_mode=Gtk.WrapMode.WORD_CHAR, vexpand=True, left_margin=4, top_margin=6,
                                  bottom_margin=20, accepts_tab=False)
         self.body.add_css_class("ml-edit")
+        self.fmt = richtext.Formatter(self.body, self)
+        form.append(self.fmt.bar)
         sc = Gtk.ScrolledWindow(child=self.body, vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
         form.append(sc)
         panel = tui.Panel("mail", form)
@@ -101,6 +126,8 @@ class ComposeWindow(Gtk.ApplicationWindow):
         panel.set_vexpand(True)
         self.panel = panel
         status = tui.hbox(tui.label("strg+enter", "accent"), tui.label("senden", "dim"),
+                          tui.label("strg+b/i/u", "accent"), tui.label("fett/kursiv/unterstr.", "dim"),
+                          tui.label("strg+k", "accent"), tui.label("link", "dim"),
                           tui.label("esc", "accent"), tui.label("schließen", "dim"), spacing=6)
         status.add_css_class("statusbar")
         content = tui.vbox(Gtk.WindowHandle(child=top), panel, status, spacing=0)
@@ -130,7 +157,11 @@ class ComposeWindow(Gtk.ApplicationWindow):
         drop.connect("drop", self._drop)
         self.add_controller(drop)
         self.connect("close-request", self._closing)
+        for e in (self.to, self.cc, self.bcc):
+            e.connect("changed", lambda *_: self._keys_later())
         self._prefill(mailto)
+        self._show_from()
+        self._keys_later(0)
 
     # ---------------- Vorbelegen
     def _prefill(self, mailto):
@@ -193,6 +224,79 @@ class ComposeWindow(Gtk.ApplicationWindow):
             self.title_lbl.set_label("entwurf")
         self.set_title(f"mailist · {self.title_lbl.get_label()}")
 
+    # ---------------- Absender & OpenPGP
+    def _show_from(self):
+        self.from_btn.set_label(f"von: {self.acct.label}")
+        self.from_btn.set_tooltip_text(f"Absender: {self.acct.address} – klicken wechselt das Konto")
+
+    def _next_account(self):
+        ids = list(self.app.accounts)
+        self.acct = self.app.accounts[ids[(ids.index(self.acct.id) + 1) % len(ids)]]
+        self.st = self.acct.store
+        self._show_from()
+        self._keys_later(0)
+
+    def _keys_later(self, delay=500):
+        if self._key_timer:
+            GLib.source_remove(self._key_timer)
+        self._key_timer = GLib.timeout_add(delay, self._lookup_keys)
+
+    def _lookup_keys(self):
+        self._key_timer = None
+        if not self.sign_btn.get_visible():
+            return False
+        addrs = self._recipients(self.to.get_text()) + self._recipients(self.cc.get_text()) + \
+            self._recipients(self.bcc.get_text())
+        me = self.acct.address
+
+        def work():
+            own = pgp.own_key(me) if me else None
+            keys = pgp.keys_for(addrs) if addrs else ({}, [])
+            GLib.idle_add(lambda: (self._keys_found(own, keys, addrs), False)[1])
+        threading.Thread(target=work, daemon=True).start()
+        return False
+
+    def _keys_found(self, own, keys, addrs):
+        self.own = own
+        self.keys = keys
+        self.sign_btn.set_sensitive(bool(own))
+        self.sign_btn.set_tooltip_text("Mit deinem OpenPGP-Schlüssel signieren" if own else
+                                       "Kein eigener Schlüssel für diese Adresse – Einstellungen → Verschlüsselung")
+        can_enc = bool(own and addrs and not keys[1])
+        self.enc_btn.set_sensitive(can_enc)
+        if not own:
+            tip = "Erst einen eigenen Schlüssel anlegen (Einstellungen → Verschlüsselung)"
+        elif not addrs:
+            tip = "Empfänger eintragen"
+        elif keys[1]:
+            tip = "Kein Schlüssel für: " + ", ".join(keys[1][:4])
+        else:
+            tip = "Für alle Empfänger ist ein Schlüssel da"
+        self.enc_btn.set_tooltip_text(tip)
+        self._pgp_buttons()
+
+    def _want_sign(self):
+        if not getattr(self, "own", None):
+            return False
+        return self.app.pref("pgp_sign", False) if self.sign is None else self.sign
+
+    def _want_enc(self):
+        if not self.enc_btn.get_sensitive():
+            return False
+        return self.app.pref("pgp_encrypt", True) if self.encrypt is None else self.encrypt
+
+    def _pgp_buttons(self):
+        for b, on in ((self.sign_btn, self._want_sign()), (self.enc_btn, self._want_enc())):
+            (b.add_css_class if on else b.remove_css_class)("on")
+
+    def _toggle_sign(self):
+        self.sign = not self._want_sign()
+        self._pgp_buttons()
+
+    def _toggle_enc(self):
+        self.encrypt = not self._want_enc()
+        self._pgp_buttons()
+
     # ---------------- Anhänge
     def pick_files(self):
         dlg = Gtk.FileDialog(title="Anhänge wählen")
@@ -247,7 +351,7 @@ class ComposeWindow(Gtk.ApplicationWindow):
         total = sum(len(d) for _, d, _ in self.files)
         self.info.set_label(f"{len(self.files)} anhänge · {human_size(total)}" if self.files else "")
         if total > 24 * 1024 * 1024:
-            self.info.set_label(f"✗ zusammen {human_size(total)} – gmail nimmt höchstens 25 MB")
+            self.info.set_label(f"✗ zusammen {human_size(total)} – die meisten anbieter nehmen höchstens 25 MB")
 
     # ---------------- Adressvorschläge
     def _suggest(self, entry):
@@ -299,9 +403,24 @@ class ComposeWindow(Gtk.ApplicationWindow):
         return [a for _, a in email.utils.getaddresses([text]) if a]
 
     def build(self):
+        """→ fertige Mail als Bytes. Mit Signieren/Verschlüsseln kann das blockieren (gpg-Passphrase) →
+        dann nicht im GTK-Thread aufrufen (send() macht das im Hintergrund)."""
+        msg = self.build_msg()
+        sign = self._want_sign()
+        enc = self._want_enc()
+        if not (sign or enc):
+            return msg.as_bytes()
+        own = self.own["fpr"]
+        hidden = [self.keys[0][a] for a in self._recipients(self.bcc.get_text()) if a.lower() in self.keys[0]]
+        vis = [f for a, f in self.keys[0].items() if f not in hidden]
+        return pgp.wrap(msg, own if sign else None, (vis + [own]) if enc else None, hidden if enc else ())
+
+    def build_msg(self):
         msg = email.message.EmailMessage(policy=email.policy.SMTP)
-        if self.st.me:
-            msg["From"] = self.st.me
+        me = self.acct.address
+        if me:
+            name = self.acct.conf.get("sender_name")
+            msg["From"] = email.utils.formataddr((name, me)) if name else me
         for k, e in (("To", self.to), ("Cc", self.cc), ("Bcc", self.bcc)):
             v = e.get_text().strip().strip(",").strip()
             if v:
@@ -312,12 +431,21 @@ class ComposeWindow(Gtk.ApplicationWindow):
         for k, v in self.headers.items():
             if v:
                 msg[k] = v
-        buf = self.body.get_buffer()
-        msg.set_content(buf.get_text(buf.get_start_iter(), buf.get_end_iter(), False))
+        if self.fmt.used():
+            msg.set_content(self.fmt.to_plain())
+            msg.add_alternative(self.fmt.to_html(), subtype="html")
+        else:
+            buf = self.body.get_buffer()
+            msg.set_content(buf.get_text(buf.get_start_iter(), buf.get_end_iter(), False))
         for name, data, ctype in self.files:
             maintype, _, subtype = (ctype or "application/octet-stream").partition("/")
             msg.add_attachment(data, maintype=maintype, subtype=subtype or "octet-stream", filename=name)
-        return msg.as_bytes()
+        own = getattr(self, "own", None)
+        if own and self.app.pref("pgp_on", True) and self.app.pref("pgp_autocrypt_send", False):
+            ac = pgp.autocrypt_header(me, own["fpr"])
+            if ac:
+                msg["Autocrypt"] = ac
+        return msg
 
     def send(self):
         to = self._recipients(self.to.get_text()) + self._recipients(self.cc.get_text()) + \
@@ -333,20 +461,38 @@ class ComposeWindow(Gtk.ApplicationWindow):
         if sum(len(d) for _, d, _ in self.files) > 24 * 1024 * 1024:
             self.info.set_label("✗ anhänge zu groß (höchstens 25 MB)")
             return
-        raw = self.build()
+        if self._want_sign() or self._want_enc():
+            # gpg fragt evtl. nach der Passphrase → im Hintergrund, Fenster bleibt bedienbar
+            self.send_btn.set_sensitive(False)
+            self.info.set_label("\U000F033E signiere/verschlüssele … (gpg fragt evtl. nach deiner passphrase)")
+
+            def work():
+                try:
+                    raw, err = self.build(), None
+                except Exception as e:
+                    raw, err = None, str(e)
+                GLib.idle_add(lambda: (self._queue(raw) if raw else self._send_failed(err), False)[1])
+            threading.Thread(target=work, daemon=True).start()
+            return
+        self._queue(self.build())
+
+    def _send_failed(self, err):
+        self.send_btn.set_sensitive(True)
+        self.info.set_label(f"✗ {err}")
+
+    def _queue(self, raw):
         subj = self.subject.get_text().strip()
         self.st.queue({"op": "send", "ids": [], "raw": base64.b64encode(raw).decode(), "thread": self.thread,
                        "subject": subj})
         if self.mode == "draft" and self.row:
             self.st.queue({"op": "delete", "ids": [self.row["id"]]})
             self.st.drop([self.row["id"]])
-        self.app.syncer.request("flush")
-        self.app.syncer.request("sync")
+        self.acct.syncer.request("flush")
+        self.acct.syncer.request("sync")
         self.sent = True
         w = self.app.win
         if w:
-            import gmail
-            w.say(f"wird gesendet: {subj or '(ohne betreff)'}" if gmail.online() else
+            w.say(f"wird gesendet: {subj or '(ohne betreff)'}" if self.acct.backend.online() else
                   "offline – wird gesendet, sobald wieder netz da ist")
         self.close()
 
@@ -355,6 +501,8 @@ class ComposeWindow(Gtk.ApplicationWindow):
         ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
         if ctrl and kv in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
             self.send()
+            return True
+        if self.fmt.key(kv, state):
             return True
         if kv == Gdk.KEY_Escape and not self.sugg.get_visible():
             self.close()

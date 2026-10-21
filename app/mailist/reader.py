@@ -11,6 +11,7 @@ from gi.repository import Gdk, Gio, GLib, Gtk, Pango
 import gmail
 import guard
 import mime
+import pgp
 import store as stmod
 import tui
 
@@ -22,8 +23,20 @@ def fetch_raw(st, mid):
     raw = st.body(mid)
     if raw is not None:
         return raw
-    raw, _meta = gmail.raw(mid)
+    raw = st.backend.raw(mid)
     st.save_body(mid, raw)
+    r = st.message(mid)
+    if r is not None and not r["snippet"]:            # IMAP liefert keine Vorschau → aus dem Text nachtragen
+        try:
+            m = mime.Mail(raw)
+            text = m.plain or re.sub(r"<[^>]+>|&nbsp;", " ", m.html or "")
+            snip = " ".join(text.split())[:180]
+            if snip:
+                with st.lock:
+                    st.db.execute("UPDATE messages SET snippet=? WHERE id=?", (snip, mid))
+                    st.db.commit()
+        except Exception:
+            pass
     return raw
 
 
@@ -290,6 +303,58 @@ class Reader(Gtk.Box):
     def _loaded(self, token, raw):
         if token != self._load_token:
             return
+        self.spgp = None
+        p = self.win.prefs
+        if p.get("pgp_on", True) and pgp.available() and pgp.looks_pgp(raw):
+            dec, ver = p.get("pgp_decrypt", True), p.get("pgp_verify", True)
+            if dec or ver:
+                self.spinner.set_label("\U000F033E entschlüssele / prüfe signatur …")
+                self.spinner.set_visible(True)
+                fut = _pool.submit(pgp.process, raw, dec, ver)
+                fut.add_done_callback(lambda f: GLib.idle_add(lambda: (self._pgp_done(token, raw, f), False)[1]))
+                return
+        self._show_loaded(token, raw)
+
+    def _pgp_done(self, token, raw, fut):
+        if token != self._load_token:
+            return
+        try:
+            raw2, st = fut.result()
+        except Exception as e:
+            raw2, st = raw, {"encrypted": False, "decrypted": False, "error": f"gpg: {e}", "sig": None}
+        self.spgp = st
+        self._show_loaded(token, raw2)
+
+    def _pgp_why(self):
+        """OpenPGP-Ergebnis als Hinweise für den Kasten oben."""
+        st = getattr(self, "spgp", None)
+        if not st:
+            return []
+        out = []
+        if st.get("encrypted"):
+            if st.get("decrypted"):
+                out.append(("ok", "\U000F033E verschlüsselt (openpgp) – entschlüsselt"))
+            elif st.get("error"):
+                out.append(("mittel", f"\U000F033E verschlüsselt – {st['error']}"))
+            else:
+                out.append(("info", "\U000F033E verschlüsselt – entschlüsseln ist in den einstellungen aus"))
+        sig = st.get("sig")
+        if sig:
+            who = sig.get("who") or sig.get("fpr", "")[-16:]
+            txt = {"good": f"signatur gültig: {who}" + (" (schlüssel nicht beglaubigt)"
+                                                          if sig.get("trust") in ("", "undefined", "never") else ""),
+                   "bad": "signatur UNGÜLTIG – der inhalt wurde nach dem signieren verändert",
+                   "expired": f"signatur von {who} – schlüssel abgelaufen",
+                   "revoked": f"signatur von {who} – schlüssel wurde widerrufen",
+                   "nokey": "signiert, aber der öffentliche schlüssel des absenders fehlt",
+                   "unknown": "signatur ließ sich nicht prüfen"}[sig.get("state", "unknown")]
+            lvl = {"good": "ok", "bad": "hoch", "revoked": "hoch", "expired": "mittel"}.get(sig.get("state"), "info")
+            out.append((lvl, "\U000F0124 " + txt))
+        return out
+
+    def _show_loaded(self, token, raw):
+        if token != self._load_token:
+            return
         self.spinner.set_visible(False)
         try:
             self.mail = mime.Mail(raw)
@@ -301,10 +366,19 @@ class Reader(Gtk.Box):
         self._attachments()
         if self.osint:
             self.osint.set_mail(self.row, self.mail)
+        p = self.win.prefs
+        ac = self.mail.header("Autocrypt")
+        if ac and self.row and p.get("pgp_on", True) and p.get("pgp_autocrypt_import", False) and pgp.available():
+            _pool.submit(pgp.import_autocrypt, ac, self.row["from_addr"])
 
     def _render_body(self):
         lvl, why, self.link_warn, (segs, info) = guard.full(self.row, self.mail, self.st if self.mid else None) \
             if self.row else ("ok", [], {}, self.mail.render())
+        if not self.win.prefs.get("sec_check", True):
+            why, self.link_warn = [], {}               # Sicherheits-Check in den Einstellungen aus
+        why = self._pgp_why() + list(why)
+        if why:
+            lvl = guard.level_of(why)
         if not self.win.prefs.get("html", True) and self.mail.plain:
             segs, links = mime.plain_segments(self.mail.plain)
             info = dict(info, links=links)
@@ -444,7 +518,7 @@ class Reader(Gtk.Box):
 
     def _prefetch_next(self):
         """Die nächsten paar ungelesenen Mails schon im Hintergrund laden (Pfeil runter = sofort)."""
-        if not gmail.logged_in():
+        if not self.st.backend.logged_in():
             return
         pos = self.win._first_selected_pos()
         if pos is None:
@@ -547,9 +621,14 @@ class Reader(Gtk.Box):
             self.win.say(f"link nicht geöffnet (unbekannte art): {href[:80]}", error=True)
             return
         warn = self.link_warn.get(href)
-        if warn:
+        p = self.win.prefs
+        if warn and p.get("sec_link_confirm", True):
             pages.confirm(self.win, "verdächtiger link", f"{warn}\n\nziel: {href[:300]}", "trotzdem öffnen",
                           lambda: Gtk.UriLauncher(uri=href).launch(self.win, None, None))
+            return
+        if p.get("sec_all_links", False) and not href.startswith("mailto:"):
+            pages.confirm(self.win, "link öffnen?", f"ziel: {href[:300]}", "öffnen",
+                          lambda: Gtk.UriLauncher(uri=href).launch(self.win, None, None), danger=False)
             return
         Gtk.UriLauncher(uri=href).launch(self.win, None, None)
 
@@ -563,7 +642,23 @@ class Reader(Gtk.Box):
         m.item("speichern & im ordner zeigen", lambda: self.save_att(i, show=True))
         if len(self.mail.attachments) > 1:
             m.item(f"alle {len(self.mail.attachments)} speichern", self.save_all)
+        ctype = self.mail.attachments[i][1]
+        if pgp.available() and (ctype == "application/pgp-keys" or name.lower().endswith((".asc", ".pgp", ".gpg"))
+                                and b"PUBLIC KEY BLOCK" in (self._att_bytes(i) or b"")[:200]):
+            m.item("\U000F0306 openpgp-schlüssel übernehmen", lambda: self.import_key(i))
         m.popup()
+
+    def import_key(self, i):
+        data = self._att_bytes(i)
+
+        def done(f):
+            try:
+                n, text = f.result()
+            except Exception as e:
+                n, text = 0, str(e)
+            GLib.idle_add(lambda: (self.win.say(f"{n} schlüssel übernommen" if n else f"nichts übernommen: {text[-120:]}",
+                                                error=not n), False)[1])
+        _pool.submit(pgp.import_keys, data).add_done_callback(done)
 
     def _att_bytes(self, i):
         return self.mail.payload(self.mail.attachments[i][3])
@@ -601,7 +696,7 @@ class Reader(Gtk.Box):
             with open(path, "wb") as f:
                 f.write(self._att_bytes(i))
             Gtk.FileLauncher(file=Gio.File.new_for_path(path)).launch(self.win, None, None)
-        if name.lower().endswith(mime.RISKY_EXT):
+        if name.lower().endswith(mime.RISKY_EXT) and self.win.prefs.get("sec_risky_att", True):
             pages.confirm(self.win, "anhang öffnen?", f"„{name}“ ist ein Dateityp, mit dem oft Schadsoftware kommt. "
                           "Nur öffnen, wenn du ihn erwartet hast.", "trotzdem öffnen", go)
         else:

@@ -1,6 +1,6 @@
 # mailist
 
-Schlankes Gmail-Programm im Terminal-Look der Suite (GTK4), aufgebaut wie ein Datei-Explorer:
+Schlankes Mail-Programm (Gmail und IMAP/SMTP) im Terminal-Look der Suite (GTK4), aufgebaut wie ein Datei-Explorer:
 links Ordner und Labels, in der Mitte die Mail-Liste mit Spalten, rechts die Vorschau, oben Tabs.
 Mails liegen in einem lokalen Zwischenspeicher – das Fenster ist sofort da und auch offline lesbar.
 
@@ -18,6 +18,21 @@ cd ~/mailist-src && ./install.sh
 
 Der Installer fragt nach den Systempaketen (GTK4, PyGObject – einmal Passwort), kopiert mailist nach
 `~/.local/share/mailist` und legt den Befehl `mailist` und einen Menüeintrag an. Symbole bringt mailist selbst mit.
+
+## Mehrere Postfächer
+
+Unter **konten** lassen sich beliebig viele Postfächer hinzufügen: weitere Gmail-Konten und jedes Postfach mit
+IMAP/SMTP (GMX, web.de, Outlook, Posteo, mailbox.org, iCloud werden an der Adresse erkannt, alles andere per
+Server-Angaben). Gewechselt wird oben in der Ordnerleiste oder mit `Strg+Shift+A`; alle Postfächer gleichen im
+Hintergrund ab. Passwörter liegen im System-Schlüsselbund (abschaltbar), nie im Klartext.
+
+## Verschlüsselung (OpenPGP)
+
+Über das installierte `gpg`: im Schreibfenster **signieren** und **verschlüsseln** (schaltet sich von selbst ein,
+wenn für alle Empfänger ein Schlüssel da ist), beim Lesen werden Signaturen geprüft und verschlüsselte Mails
+entschlüsselt. Eigenen Schlüssel erzeugen/exportieren/importieren unter **einstellungen**. Alle
+sicherheitsrelevanten Schalter (Verbindungen, Zertifikate, Schlüsselbund, OpenPGP, Autocrypt, Rückfragen bei
+Links/Anhängen) stehen ebenfalls dort.
 
 ## Mit Gmail verbinden (einmalig)
 
@@ -37,7 +52,7 @@ Im Testmodus beendet Google die Anmeldung nach 7 Tagen; mailist zeigt dann oben 
 - **Löschen:** Entf (Papierkorb), Shift+Entf (endgültig), Papierkorb-Knopf an jeder Zeile, Strg+Z macht es
   rückgängig. Mehrere auswählen (Strg/Shift-Klick, Strg+A) → große Knöpfe für alle.
 - **aufräumen** (links): wer schickt am meisten? Alle Mails eines Absenders mit einem Klick weg, Newsletter abbestellen.
-- **Suche:** tippen filtert sofort lokal, Enter sucht in ganz Gmail (auch `from:` `has:attachment` …).
+- **Suche:** tippen filtert sofort lokal, Enter sucht im ganzen Postfach (bei Gmail auch `from:` `has:attachment` …).
 - Tasten: r antworten · a allen · f weiterleiten · e archivieren · s Stern · u gelesen/ungelesen · j/k nächste/vorige ·
   Strg+N neu · Strg+T Tab · F9 Ordnerleiste · F3 Vorschau · F5 abgleichen. Zwei Finger wischen = zurück/vor.
 - Mails auf einen Ordner links ziehen = verschieben (Papierkorb, Spam, Label).

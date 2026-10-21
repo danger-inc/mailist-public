@@ -261,6 +261,26 @@ class Store:
                                 (n - BODY_KEEP,))
             self.db.commit()
 
+    # ---------------- umbenannte Mails (IMAP: Verschieben vergibt eine neue Nummer)
+    def alias(self, old, new):
+        with self.lock:
+            self.db.execute("INSERT OR REPLACE INTO kv VALUES (?,?)", ("alias:" + old, new))
+            self.db.execute("UPDATE OR REPLACE messages SET id=? WHERE id=?", (new, old))
+            self.db.execute("UPDATE OR REPLACE bodies SET id=? WHERE id=?", (new, old))
+            self.db.commit()
+
+    def resolve(self, ids):
+        out = []
+        for i in ids:
+            seen = 0
+            while seen < 20:
+                r = self.db.execute("SELECT v FROM kv WHERE k=?", ("alias:" + i,)).fetchone()
+                if not r:
+                    break
+                i, seen = r[0], seen + 1
+            out.append(i)
+        return out
+
     # ---------------- Warteschlange
     def queue(self, op):
         with self.lock:
@@ -284,23 +304,25 @@ class Store:
 
 # ====================================================================== Abgleich
 class Syncer:
-    """Alles, was mit Gmail spricht, läuft hier – nacheinander in einem Arbeits-Thread.
+    """Alles, was mit dem Postfach spricht, läuft hier – nacheinander in einem Arbeits-Thread je Konto.
+    Was genau passiert, weiß das Backend (GmailBackend hier, ImapBackend in imapmail.py).
     on_event(art, daten) wird im Arbeits-Thread gerufen (UI muss selbst in den GTK-Thread wechseln)."""
 
-    def __init__(self, store, on_event, limit=2000):
+    def __init__(self, store, on_event, limit=2000, backend=None, name="mailist-sync"):
         self.st = store
         self.on_event = on_event
         self.limit = limit
+        self.backend = backend or GmailBackend()
         self.jobs = []
         self.cv = threading.Condition()
         self.busy = False
-        self.thread = threading.Thread(target=self._loop, daemon=True, name="mailist-sync")
+        self.thread = threading.Thread(target=self._loop, daemon=True, name=name)
         self.thread.start()
 
     # ---- Aufträge
     def request(self, kind, *args):
         with self.cv:
-            if kind == "sync" and any(j[0] == "sync" for j in self.jobs):
+            if kind in ("sync", "flush") and any(j[0] == kind for j in self.jobs):
                 return
             self.jobs.append((kind, args))
             self.cv.notify()
@@ -313,7 +335,8 @@ class Syncer:
                 kind, args = self.jobs.pop(0)
             self.busy = True
             try:
-                getattr(self, "_job_" + kind)(*args)
+                with self.backend.bound():
+                    getattr(self, "_job_" + kind)(*args)
             except gmail.ExpiredError:
                 self.on_event("expired", None)
             except gmail.AuthError as e:
@@ -330,61 +353,162 @@ class Syncer:
                 self.busy = False
                 self.on_event("idle", kind)
 
-    # ---- Abgleich
+    def ready(self):
+        b = self.backend
+        return b.logged_in() and not b.expired()
+
+    # ---- Aufträge → Backend
     def _job_sync(self):
-        if not gmail.logged_in() or gmail.expired():
+        if not self.ready():
             return
-        if not gmail.online():
+        if not self.backend.online():
             self.on_event("offline", "keine Verbindung")
             return
         self.on_event("busy", "abgleich …")
         self.flush()
-        hid = self.st.get("history")
-        if not self.st.me:
-            prof = gmail.profile()
-            self.st.me = prof.get("emailAddress", "").lower()
-            self.st.put("me", self.st.me)
-        self.st.save_labels(gmail.labels())
-        new = []
-        if hid:
-            try:
-                new = self.incremental(hid)
-            except gmail.ApiError as e:
-                if e.status != 404:
-                    raise
-                self.full()
-        else:
-            self.full()
-        ids = [r["id"] for r in self.st.labels()]
-        self.st.save_counts(gmail.label_counts(ids))
+        new = self.backend.sync(self)
         self.st.put("synced", int(time.time()))
         self.on_event("synced", new)
 
-    def full(self):
+    def flush(self):
+        """Eigene Änderungen ans Postfach schicken (in Reihenfolge; Netzfehler → später erneut)."""
+        b = self.backend
+        errors = []
+        for n, op in self.st.pending():
+            op = dict(op)
+            op["ids"] = self.st.resolve(op.get("ids", []))
+            if op.get("respam"):
+                op["respam"] = self.st.resolve(op["respam"])
+            try:
+                b.apply(self, op)
+                if op["op"] == "send":
+                    self.on_event("sent", op.get("subject", ""))
+                self.st.done(n)
+            except gmail.ApiError as e:
+                if e.status in (400, 403, 404):
+                    self.st.done(n)                      # dauerhaft abgelehnt – nicht ewig wiederholen
+                    bad = list(getattr(e, "failed", None) or op["ids"])
+                    try:
+                        b.resync(self, bad)              # lokal wieder auf den echten Stand
+                    except Exception:
+                        pass
+                    what = {"modify": "ändern", "trash": "löschen", "untrash": "wiederherstellen",
+                            "delete": "endgültig löschen", "send": "senden"}.get(op["op"], op["op"])
+                    msg = getattr(e, "args", [""])[0]
+                    errors.append(f"{what}: {b.name} hat abgelehnt – {msg}")
+                    print(f"mailist: {op['op']} abgelehnt: {e} {e.reason} ids={bad[:5]}", flush=True)
+                    if e.status == 403 and e.reason in ("insufficientPermissions", "ACCESS_TOKEN_SCOPE_INSUFFICIENT"):
+                        errors[-1] = "Berechtigung fehlt – bitte neu anmelden"
+                else:
+                    if e.reason == "rate":
+                        errors.append(f"{b.name} bremst gerade – deine änderungen gehen in einer halben minute raus")
+                        threading.Timer(30, lambda: self.request("flush")).start()
+                    else:
+                        errors.append(f"{op['op']}: {e} – später erneut")
+                    break
+        if errors:
+            self.on_event("errors", errors)
+
+    def _job_flush(self):
+        if self.ready() and self.backend.online():
+            if not self.st.pending():
+                return
+            self.flush()
+            self.backend.after_flush(self)
+
+    def _job_more(self, folder):
+        self.backend.more(self, folder)
+
+    def _job_search(self, query, token):
+        self.backend.search(self, query, token)
+
+
+class GmailBackend:
+    """Gmail über die REST-API. token: Pfad der Token-Datei dieses Kontos."""
+    kind = "gmail"
+    name = "gmail"
+    categories = True             # Gmail-Kategorien (Werbung, Soziale Netze …) und „wichtig“
+    labels_are_folders = False    # eine Mail kann mehrere Label haben
+
+    def __init__(self, token=None):
+        self.token = token or gmail.TOKEN
+
+    def bound(self):
+        return gmail.bound(self.token)
+
+    def logged_in(self):
+        with self.bound():
+            return gmail.logged_in()
+
+    def expired(self):
+        with self.bound():
+            return gmail.expired()
+
+    def online(self):
+        return gmail.online()
+
+    def raw(self, mid):
+        with self.bound():
+            return gmail.raw(mid)[0]
+
+    def attachment(self, mid, aid):
+        with self.bound():
+            return gmail.attachment(mid, aid)
+
+    def logout(self):
+        with self.bound():
+            gmail.logout()
+
+    # ---- Abgleich
+    def sync(self, sy):
+        st = sy.st
+        hid = st.get("history")
+        if not st.me:
+            prof = gmail.profile()
+            st.me = prof.get("emailAddress", "").lower()
+            st.put("me", st.me)
+        st.save_labels(gmail.labels())
+        new = []
+        if hid:
+            try:
+                new = self.incremental(sy, hid)
+            except gmail.ApiError as e:
+                if e.status != 404:
+                    raise
+                self.full(sy)
+        else:
+            self.full(sy)
+        ids = [r["id"] for r in st.labels()]
+        st.save_counts(gmail.label_counts(ids))
+        return new
+
+    def full(self, sy):
         """Erstabgleich (oder History zu alt): neueste N Mails, Stück für Stück, Neueste zuerst."""
+        st = sy.st
         hid = gmail.profile().get("historyId")
-        ids, _ = gmail.list_ids(limit=self.limit, spam_trash=True)
-        known = self.st.known(ids)
+        ids, _ = gmail.list_ids(limit=sy.limit, spam_trash=True)
+        known = st.known(ids)
         stale = [i for i in ids if i in known]
         todo = [i for i in ids if i not in known] + stale        # bekannte am Ende auffrischen (Label)
         done = 0
         for i in range(0, len(todo), 120):
             part = todo[i:i + 120]
             metas = gmail.metadata(part)
-            self.st.ingest(metas.values())
+            st.ingest(metas.values())
             done += len(part)
-            self.on_event("progress", (done, len(todo)))
+            sy.on_event("progress", (done, len(todo)))
         if ids:
             # was lokal im selben Zeitraum liegt, aber bei Gmail fehlt, ist dort gelöscht
-            oldest = self.st.db.execute("SELECT MIN(date) FROM messages WHERE id IN (%s)" % ",".join(
+            oldest = st.db.execute("SELECT MIN(date) FROM messages WHERE id IN (%s)" % ",".join(
                 "?" * min(len(ids), 900)), ids[-900:]).fetchone()[0] or 0
-            have = {r[0] for r in self.st.db.execute("SELECT id FROM messages WHERE date >= ?", (oldest,))}
+            have = {r[0] for r in st.db.execute("SELECT id FROM messages WHERE date >= ?", (oldest,))}
             gone = have - set(ids)
             if gone:
-                self.st.drop(gone)
-        self.st.put("history", hid)
+                st.drop(gone)
+        st.put("history", hid)
 
-    def incremental(self, hid):
+    def incremental(self, sy, hid):
+        st = sy.st
         hist, newhid = gmail.history(hid)
         add, fetch, drop = [], set(), set()
         for h in hist:
@@ -396,105 +520,124 @@ class Syncer:
                     add.append(m["id"])
             for x in h.get("messagesDeleted", []):
                 drop.add(x["message"]["id"])
-            for key, sign in (("labelsAdded", 1), ("labelsRemoved", -1)):
+            for key in ("labelsAdded", "labelsRemoved"):
                 for x in h.get(key, []):
                     mid = x["message"]["id"]
                     if mid in fetch or mid in drop:
                         continue
                     labs = x["message"].get("labelIds")
-                    if labs is not None and self.st.known([mid]):
-                        with self.st.lock:
-                            self.st.db.execute("UPDATE messages SET labels=?, unread=?, starred=? WHERE id=?",
-                                               (" " + " ".join(labs) + " ", int("UNREAD" in labs),
-                                                int("STARRED" in labs), mid))
-                            self.st.db.commit()
+                    if labs is not None and st.known([mid]):
+                        with st.lock:
+                            st.db.execute("UPDATE messages SET labels=?, unread=?, starred=? WHERE id=?",
+                                          (" " + " ".join(labs) + " ", int("UNREAD" in labs),
+                                           int("STARRED" in labs), mid))
+                            st.db.commit()
                     else:
                         fetch.add(mid)
         fetch -= drop
         if drop:
-            self.st.drop(drop)
+            st.drop(drop)
         if fetch:
             metas = gmail.metadata(list(fetch))
-            self.st.ingest(metas.values())
-        self.st.put("history", newhid)
-        known_before = add
-        return [m for m in known_before if m not in drop]
+            st.ingest(metas.values())
+        st.put("history", newhid)
+        return [m for m in add if m not in drop]
 
-    def flush(self):
-        """Eigene Änderungen zu Gmail schicken (in Reihenfolge; Netzfehler → später erneut)."""
-        errors = []
-        for n, op in self.st.pending():
-            ids = op.get("ids", [])
-            try:
-                k = op["op"]
-                if k == "modify":
-                    gmail.modify(ids, op.get("add", []), op.get("remove", []))
-                elif k == "trash":
-                    gmail.trash(ids)
-                elif k == "untrash":
-                    gmail.trash(ids, undo=True)
-                elif k == "delete":
-                    gmail.delete(ids)
-                elif k == "send":
-                    import base64
-                    gmail.send(base64.b64decode(op["raw"]), op.get("thread"))
-                    self.on_event("sent", op.get("subject", ""))
-                self.st.done(n)
-            except gmail.ApiError as e:
-                if e.status in (400, 403, 404):
-                    self.st.done(n)                      # dauerhaft abgelehnt – nicht ewig wiederholen
-                    errors.append(f"{op['op']}: von Gmail abgelehnt ({e})")
-                    if e.status == 403 and e.reason in ("insufficientPermissions", "ACCESS_TOKEN_SCOPE_INSUFFICIENT"):
-                        errors[-1] = "Berechtigung fehlt – bitte neu anmelden"
-                else:
-                    errors.append(f"{op['op']}: {e} – später erneut")
-                    break
-        if errors:
-            self.on_event("errors", errors)
+    def apply(self, sy, op):
+        ids = op.get("ids", [])
+        k = op["op"]
+        if k == "modify":
+            gmail.modify(ids, op.get("add", []), op.get("remove", []))
+        elif k == "trash":
+            gmail.trash(ids)
+        elif k == "untrash":
+            gmail.trash(ids, undo=True)
+            if op.get("respam"):
+                gmail.modify(op["respam"], ["SPAM"], ["INBOX"])
+        elif k == "delete":
+            gmail.delete(ids)
+        elif k == "send":
+            import base64
+            gmail.send(base64.b64decode(op["raw"]), op.get("thread"))
 
-    # ---- weitere Aufträge
-    def _job_flush(self):
-        if gmail.logged_in() and not gmail.expired() and gmail.online():
-            if not self.st.pending():
-                return
-            self.flush()
-            ids = [r["id"] for r in self.st.labels()]
-            self.st.save_counts(gmail.label_counts(ids))       # Zähler links (ungelesen) gleich auffrischen
+    def resync(self, sy, ids):
+        """Nach einer Ablehnung: Kopfdaten frisch holen, damit die Liste wieder stimmt."""
+        if not ids:
+            return
+        try:
+            metas = gmail.metadata(ids)
+        except (gmail.ApiError, OSError):
+            return
+        sy.st.ingest(metas.values())
 
-    def _job_more(self, folder):
-        """Ältere Mails eines Ordners nachladen."""
-        old = self.st.oldest(folder)
-        q = f"before:{int(old / 1000)}" if old else None
+    def after_flush(self, sy):
+        ids = [r["id"] for r in sy.st.labels()]
+        sy.st.save_counts(gmail.label_counts(ids))       # Zähler links (ungelesen) gleich auffrischen
+
+    def more(self, sy, folder, want=150):
+        """Ältere Mails eines Ordners nachladen – lückenlos: Gmail-Liste Seite für Seite weiterblättern
+        (Stand je Ordner gemerkt) und nur Unbekannte holen. Früher ging es ab der ältesten lokalen Mail weiter;
+        lag durch eine Suche eine sehr alte Mail im Speicher, sprang das um Jahre zurück."""
+        st = sy.st
+        key = "more:" + folder
         label = None if folder in ("ALLMAIL", "PRIMARY") else folder
+        q = "category:primary" if folder == "PRIMARY" else None
         if folder == "PRIMARY":
-            label, q = "INBOX", ((q or "") + " category:primary").strip()
-        ids, page = gmail.list_ids(label=label, q=q, limit=300, spam_trash=folder in HIDDEN)
-        need = [i for i in ids if i not in self.st.known(ids)]
+            label = "INBOX"
+        page = st.get(key) or None
+        if page == "END":
+            sy.on_event("more", (folder, 0, False))
+            return
+        need, seen = [], set()
+        for _ in range(60):
+            try:
+                ids, nxt = gmail.list_ids(label=label, q=q, limit=250, page=page, spam_trash=folder in HIDDEN)
+            except gmail.ApiError as e:
+                if page and e.status == 400:      # Seitenmarke abgelaufen → von vorn
+                    page = None
+                    continue
+                raise
+            known = st.known(ids)
+            need += [i for i in ids if i not in known and i not in seen]
+            seen.update(ids)
+            page = nxt
+            if not page or len(need) >= want:
+                break
         for i in range(0, len(need), 120):
-            self.st.ingest(gmail.metadata(need[i:i + 120]).values())
-            self.on_event("progress", (min(i + 120, len(need)), len(need)))
-        self.on_event("more", (folder, len(need), bool(page)))
+            st.ingest(gmail.metadata(need[i:i + 120]).values())
+            sy.on_event("progress", (min(i + 120, len(need)), len(need)))
+        st.put(key, page or "END")           # erst merken, wenn alles da ist (sonst Lücke)
+        sy.on_event("more", (folder, len(need), bool(page)))
 
-    def _job_search(self, query, token):
+    def search(self, sy, query, token):
         ids, _ = gmail.list_ids(q=query, limit=300)
-        need = [i for i in ids if i not in self.st.known(ids)]
+        need = [i for i in ids if i not in sy.st.known(ids)]
         for i in range(0, len(need), 120):
-            self.st.ingest(gmail.metadata(need[i:i + 120]).values())
-        self.on_event("search", (token, ids))
+            sy.st.ingest(gmail.metadata(need[i:i + 120]).values())
+        sy.on_event("search", (token, ids))
 
 
 def apply_local(st, op):
     """Änderung sofort lokal sichtbar machen; gibt die Gegen-Operation (für Rückgängig) zurück."""
-    ids = op["ids"]
+    ids = op["ids"] = st.resolve(op["ids"])
+    if op.get("respam"):
+        op["respam"] = st.resolve(op["respam"])
     k = op["op"]
     if k == "modify":
         st.set_labels(ids, op.get("add", []), op.get("remove", []))
         return {"op": "modify", "ids": ids, "add": op.get("remove", []), "remove": op.get("add", [])}
     if k == "trash":
-        st.set_labels(ids, ["TRASH"], [])
-        return {"op": "untrash", "ids": ids}
+        # Spam und Papierkorb schließen sich bei Gmail aus → Spam-Label lokal mit entfernen, fürs Rückgängig merken
+        spam = [i for i in ids if (r := st.message(i)) and " SPAM " in (r["labels"] or "")]
+        st.set_labels(ids, ["TRASH"], ["SPAM"])
+        inv = {"op": "untrash", "ids": ids}
+        if spam:
+            inv["respam"] = spam
+        return inv
     if k == "untrash":
         st.set_labels(ids, [], ["TRASH"])
+        if op.get("respam"):
+            st.set_labels(op["respam"], ["SPAM"], ["INBOX"])
         return {"op": "trash", "ids": ids}
     if k == "delete":
         st.drop(ids)

@@ -1,7 +1,7 @@
 # Gmail: Anmeldung (OAuth 2.0 für Desktop-Apps, PKCE, Rückleitung an 127.0.0.1) und die Gmail-REST-API –
 # ohne Fremdbibliotheken (urllib). Gleiches Verfahren wie datist; der OAuth-Client von datist wird mitbenutzt,
 # falls mailist keinen eigenen hat. Das Token liegt getrennt in ~/.config/mailist/auth/token.json (nur für dich).
-import base64, hashlib, http.server, json, os, secrets, socket, time, uuid
+import base64, contextlib, hashlib, http.server, json, os, secrets, socket, threading, time, uuid
 import urllib.error, urllib.parse, urllib.request
 
 _XDG = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
@@ -99,18 +99,37 @@ def install_client_manual(client_id, secret):
         "token_uri": "https://oauth2.googleapis.com/token", "redirect_uris": ["http://localhost"]}})
 
 
+_ctx = threading.local()       # mehrere Gmail-Konten: jeder Thread arbeitet mit „seinem“ Token
+
+
+def token_path():
+    return getattr(_ctx, "token", None) or TOKEN
+
+
+@contextlib.contextmanager
+def bound(path):
+    """Alles in diesem Block (in diesem Thread) nutzt das Token unter path."""
+    old = getattr(_ctx, "token", None)
+    _ctx.token = path
+    try:
+        yield
+    finally:
+        _ctx.token = old
+
+
 def token():
     try:
-        with open(TOKEN) as f:
+        with open(token_path()) as f:
             return json.load(f)
     except (OSError, ValueError):
         return None
 
 
 def save_token(t):
-    os.makedirs(AUTH_DIR, exist_ok=True)
-    os.chmod(AUTH_DIR, 0o700)
-    _write_private(TOKEN, t)
+    d = os.path.dirname(token_path())
+    os.makedirs(d, exist_ok=True)
+    os.chmod(d, 0o700)
+    _write_private(token_path(), t)
 
 
 def logged_in():
@@ -138,7 +157,7 @@ def logout():
         except (urllib.error.URLError, OSError):
             pass
     try:
-        os.remove(TOKEN)
+        os.remove(token_path())
     except OSError:
         pass
 
@@ -198,9 +217,11 @@ def login_hint():
 class Login:
     """Kleiner Server auf 127.0.0.1, Google-Anmeldung im Standardbrowser, Code → Token. run() blockiert."""
 
-    def __init__(self, open_url):
+    def __init__(self, open_url, choose=False):
         self.open_url = open_url
+        self.choose = choose          # weiteres Konto: Google soll nach dem Konto fragen
         self.cancelled = False
+        self.path = token_path()      # Login läuft in eigenem Thread → Ziel jetzt merken
 
     def run(self, timeout=300):
         c = client()
@@ -238,9 +259,11 @@ class Login:
         params = {"client_id": c["client_id"], "redirect_uri": redirect, "response_type": "code", "scope": SCOPE,
                   "code_challenge": challenge, "code_challenge_method": "S256", "state": state,
                   "access_type": "offline", "prompt": "consent"}
-        hint = login_hint()
+        hint = None if self.choose else login_hint()
         if hint:
             params["login_hint"] = hint
+        if self.choose:
+            params["prompt"] = "select_account consent"
         self.open_url(AUTH_URL + "?" + urllib.parse.urlencode(params))
         end = time.time() + timeout
         try:
@@ -267,9 +290,10 @@ class Login:
                             "myaccount.google.com/permissions entfernen und erneut anmelden")
         if SCOPE not in (res.get("scope") or SCOPE):
             raise AuthError("Gmail-Zugriff wurde bei der Anmeldung nicht erlaubt (Haken bei Gmail setzen)")
-        save_token({"refresh_token": res["refresh_token"], "access_token": res["access_token"],
-                    "created": time.time(), "expires_at": time.time() + int(res.get("expires_in", 3600)),
-                    "scope": res.get("scope")})
+        with bound(self.path):
+            save_token({"refresh_token": res["refresh_token"], "access_token": res["access_token"],
+                        "created": time.time(), "expires_at": time.time() + int(res.get("expires_in", 3600)),
+                        "scope": res.get("scope")})
         return True
 
 
@@ -285,6 +309,24 @@ def _error_of(e):
     for d in err.get("errors", []) or []:
         reason = reason or d.get("reason", "")
     return err.get("message", ""), reason
+
+
+RATE_REASONS = {"rateLimitExceeded", "userRateLimitExceeded", "quotaExceeded", "RATE_LIMIT_EXCEEDED"}
+
+
+def is_rate(status, msg="", reason=""):
+    """Gmail drosselt (zu viele Anfragen pro Minute) – kommt als 429 oder als 403 „Quota exceeded“.
+    Das ist vorübergehend: später erneut versuchen, nie als „abgelehnt“ behandeln."""
+    if status == 429:
+        return True
+    m = (msg or "").lower()
+    return status == 403 and (reason in RATE_REASONS or "quota" in m or "rate limit" in m)
+
+
+def _rate_of_part(st, js):
+    err = (js or {}).get("error") or {}
+    reason = next((d.get("reason", "") for d in err.get("errors", []) or []), "")
+    return is_rate(st, err.get("message", ""), reason)
 
 
 def call(method, path, params=None, body=None, timeout=30):
@@ -306,9 +348,12 @@ def call(method, path, params=None, body=None, timeout=30):
                 t.pop("access_token", None)
                 save_token(t)
                 continue
-            if e.code in (429, 500, 502, 503) and attempt < 3:
-                time.sleep(1.5 * (attempt + 1))
+            rate = is_rate(e.code, msg, reason)
+            if (rate or e.code in (500, 502, 503)) and attempt < 3:
+                time.sleep((4 if rate else 1.5) * (attempt + 1))
                 continue
+            if rate:
+                raise ApiError(429, "gmail bremst gerade (zu viele anfragen) – gleich nochmal", "rate") from None
             raise ApiError(e.code, msg or e.reason, reason) from None
     raise ApiError(0, "keine Antwort")
 
@@ -327,7 +372,7 @@ def batch(requests, chunk=40):
             part = todo[i:i + chunk]
             res = _batch_once([requests[j] for j in part])
             for j, (st, js) in zip(part, res):
-                if st in (429, 500, 503) or st is None:
+                if st in (429, 500, 503) or st is None or (st == 403 and _rate_of_part(st, js)):
                     retry.append(j)
                 else:
                     out[j] = (st, js)
@@ -370,10 +415,13 @@ def _batch_once(reqs):
                 t.pop("access_token", None)
                 save_token(t)
                 continue
-            if e.code in (429, 500, 502, 503) and attempt < 2:
-                time.sleep(2 * (attempt + 1))
-                continue
             msg, reason = _error_of(e)
+            rate = is_rate(e.code, msg, reason)
+            if (rate or e.code in (500, 502, 503)) and attempt < 2:
+                time.sleep((4 if rate else 2) * (attempt + 1))
+                continue
+            if rate:
+                raise ApiError(429, "gmail bremst gerade (zu viele anfragen) – gleich nochmal", "rate") from None
             raise ApiError(e.code, msg or e.reason, reason) from None
     else:
         return [(None, {})] * len(reqs)
@@ -471,6 +519,9 @@ def metadata(ids):
     """Kopfzeilen + Label vieler Mails per Sammelanfrage → {id: meta}. Fehlende (404) fehlen im Ergebnis."""
     q = "format=metadata&" + "&".join("metadataHeaders=" + h for h in LIST_HEADERS)
     res = batch([("GET", f"/messages/{i}?{q}", None) for i in ids])
+    # Gedrosselt/abgebrochen (nicht „gibt's nicht“) → Fehler, damit niemand Lücken für erledigt hält
+    if any(st in (429, 500, 503, None) or (st == 403 and _rate_of_part(st, js)) for st, js in res):
+        raise ApiError(429, "gmail bremst gerade (zu viele anfragen) – gleich nochmal", "rate")
     return {i: js for i, (st, js) in zip(ids, res) if st == 200 and js.get("id")}
 
 
@@ -495,16 +546,55 @@ def history(start):
             return out, hid
 
 
+FIXED = {"SENT", "DRAFT", "CHAT"}        # setzt Gmail selbst – in Änderungen „Invalid label“
+
+
+class PartialError(ApiError):
+    """Ein Teil der Mails wurde abgelehnt. failed = {id: Grund}"""
+
+    def __init__(self, failed, msg):
+        super().__init__(400, msg, "partial")
+        self.failed = failed
+
+
 def modify(ids, add=(), remove=()):
+    add = [l for l in add if l not in FIXED]
+    remove = [l for l in remove if l not in FIXED and l not in add]
+    if not ids or not (add or remove):
+        return
+    failed = {}
     for i in range(0, len(ids), 900):
-        call("POST", "/messages/batchModify", body={"ids": ids[i:i + 900], "addLabelIds": list(add),
-                                                    "removeLabelIds": list(remove)})
+        part = ids[i:i + 900]
+        try:
+            call("POST", "/messages/batchModify", body={"ids": part, "addLabelIds": add, "removeLabelIds": remove})
+        except ApiError as e:
+            if e.status not in (400, 404):
+                raise
+            # eine einzige unpassende Mail lässt die ganze Sammeländerung scheitern → einzeln versuchen
+            body = {"addLabelIds": add, "removeLabelIds": remove}
+            res = batch([("POST", f"/messages/{m}/modify", body) for m in part])
+            for m, (st, js) in zip(part, res):
+                if st in (429, 500, 503, None) or (st == 403 and _rate_of_part(st, js)):
+                    raise ApiError(429, "gmail bremst gerade (zu viele anfragen) – gleich nochmal", "rate")
+                if st not in (200, 204):
+                    failed[m] = ((js or {}).get("error") or {}).get("message") or f"status {st}"
+    if failed:
+        why = sorted(set(failed.values()))
+        raise PartialError(failed, f"{len(failed)} von {len(ids)} abgelehnt: {'; '.join(why[:3])}")
 
 
 def trash(ids, undo=False):
     verb = "untrash" if undo else "trash"
     res = batch([("POST", f"/messages/{i}/{verb}", None) for i in ids])
-    return [i for i, (st, _) in zip(ids, res) if st not in (200, 404)]
+    if any(st in (429, 500, 503, None) or (st == 403 and _rate_of_part(st, js)) for st, js in res):
+        # Teil schon erledigt? Egal – trash/untrash ist wiederholbar
+        raise ApiError(429, "gmail bremst gerade (zu viele anfragen) – gleich nochmal", "rate")
+    failed = {i: ((js or {}).get("error") or {}).get("message") or f"status {st}"
+              for i, (st, js) in zip(ids, res) if st not in (200, 404)}
+    if failed:
+        raise PartialError(failed, f"{len(failed)} von {len(ids)} abgelehnt: "
+                                   f"{'; '.join(sorted(set(failed.values()))[:3])}")
+    return []
 
 
 def delete(ids):

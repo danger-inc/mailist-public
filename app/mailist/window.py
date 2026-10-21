@@ -16,6 +16,7 @@ import swipe
 import tui
 
 SIDE_MIN = 150
+SIDE_HIDE_W = 600        # erst darunter verschwindet die Ordnerleiste von selbst
 COMPACT_W = 900          # darunter: Liste ODER Vorschau (wie am Handy)
 SYSTEM = [               # (id, symbol, name)
     ("INBOX", "\U000F02FA", "posteingang"),
@@ -82,6 +83,17 @@ class MailItem(GObject.Object):
         super().__init__()
         self.id = row["id"]
         self.row = row
+        self.cells = {}             # gebundene Zellen → bind-Funktion (zum Neuzeichnen ohne Austausch)
+
+    def update(self, row):
+        """Neue Daten, dasselbe Objekt: Zellen direkt neu befüllen. Ein Austausch im Modell würde den
+        Tastaturfokus der Liste verlieren (Pfeiltasten springen dann nach oben)."""
+        self.row = row
+        for li, fn in list(self.cells.items()):
+            if li.get_item() is self:
+                fn(li, self)
+            else:
+                self.cells.pop(li, None)
 
 
 class Tab:
@@ -117,6 +129,7 @@ class MailWindow(Gtk.ApplicationWindow):
         self._search_token = 0
         self.search_ids = {}           # suchbegriff → ids (Gmail-Suche)
         self._more_busy = False
+        self._more_end = set()         # Ordner, die schon ganz geladen sind
         self._mark_timer = None
         self._side_forced = False
 
@@ -155,11 +168,13 @@ class MailWindow(Gtk.ApplicationWindow):
         self.split.connect("notify::position", self._split_moved)
         self.cleanup = pages.Cleanup(self)
         self.account = pages.Account(self)
+        self.settings = pages.Settings(self)
         self.main = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE, transition_duration=90,
                               hhomogeneous=False, hexpand=True, vexpand=True)
         self.main.add_named(self.split, "mail")
         self.main.add_named(self.cleanup, "cleanup")
         self.main.add_named(self.account, "account")
+        self.main.add_named(self.settings, "settings")
         self.swipe = swipe.SwipeBack(self.main, self.can_back, self.go_back, where=self._where, target=self._target,
                                      can_fwd=self.can_fwd, fwd=self.go_fwd, fwd_target=self._fwd_target)
         self.body.set_end_child(self.swipe.widget)
@@ -175,7 +190,7 @@ class MailWindow(Gtk.ApplicationWindow):
                      if time.time() - int(self.st.get("synced", 0) or 0) > 60 else None)
 
         start = ("folder", self.prefs.get("start", "INBOX"))
-        if not gmail.logged_in() and not self.st.count_local("ALLMAIL"):
+        if not self.app.acct.backend.logged_in() and not self.st.count_local("ALLMAIL"):
             start = ("account",)
         for loc in self.prefs.get("tabs", []) or [list(start)]:
             self.new_tab(tuple(loc), switch=False)
@@ -263,7 +278,7 @@ class MailWindow(Gtk.ApplicationWindow):
         self.crumbs = tui.hbox(spacing=6, hexpand=True)
         self.crumbs.add_css_class("ml-crumbs")
         nav.append(self.crumbs)
-        self.search = tui.Entry("suchen · enter = in ganz gmail", width=26)
+        self.search = tui.Entry("suchen · enter = im ganzen postfach", width=26)
         self.search.set_hexpand(False)
         self.search.connect("changed", self._filter_changed)
         self.search.connect("activate", lambda *_: self.server_search())
@@ -311,12 +326,17 @@ class MailWindow(Gtk.ApplicationWindow):
         lim.set_options([("500", "500 neueste"), ("2000", "2.000 neueste"), ("5000", "5.000 neueste"),
                          ("10000", "10.000 neueste")], str(self.prefs.get("sync_limit", 2000)))
         box.append(lim)
+        more = Gtk.Button(label="alle einstellungen · sicherheit · openpgp …", focus_on_click=False)
+        more.add_css_class("ml-link")
+        more.connect("clicked", lambda *_: (pop.popdown(), self.go(("settings",))))
+        box.append(more)
         pop.set_child(box)
         return pop
 
     def _set_limit(self, v):
         self.app.set_pref("sync_limit", int(v))
-        self.app.syncer.limit = int(v)
+        for a in self.app.accounts.values():
+            a.syncer.limit = int(v)
         self.st.put("history", None)            # beim nächsten Abgleich neu füllen
         self.app.sync_now()
 
@@ -351,7 +371,17 @@ class MailWindow(Gtk.ApplicationWindow):
         def col(title, setup, bind, sorter=None, expand=False, width=None, resizable=True):
             f = Gtk.SignalListItemFactory()
             f.connect("setup", lambda _f, li: setup(li))
-            f.connect("bind", lambda _f, li: bind(li, li.get_item()))
+            def on_bind(_f, li):
+                it = li.get_item()
+                it.cells[li] = bind
+                bind(li, it)
+
+            def on_unbind(_f, li):
+                it = li.get_item()
+                if it is not None:
+                    it.cells.pop(li, None)
+            f.connect("bind", on_bind)
+            f.connect("unbind", on_unbind)
             c = Gtk.ColumnViewColumn(title=title, factory=f, expand=expand, resizable=resizable)
             if width:
                 c.set_fixed_width(width)
@@ -481,6 +511,7 @@ class MailWindow(Gtk.ApplicationWindow):
 
         self.list_scroll = Gtk.ScrolledWindow(child=self.cv, vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
         self.list_scroll.connect("edge-reached", lambda _s, pos: pos == Gtk.PositionType.BOTTOM and self.load_more())
+        self.list_scroll.get_vadjustment().connect("value-changed", self._near_end)
         self.empty = tui.vbox(tui.label("\U000F01EE", "ml-bigglyph", xalign=0.5),
                               tui.label("hier ist nichts", "ml-empty", xalign=0.5), spacing=8,
                               valign=Gtk.Align.CENTER, vexpand=True)
@@ -544,9 +575,13 @@ class MailWindow(Gtk.ApplicationWindow):
             u = labs[lid]["unread"] if lid in labs else None
             return u if u is not None else self.st.count_local(lid, unread=True)
 
+        imap = self.app.acct.kind == "imap"
+        self._account_bar()
         for lid, glyph, name in SYSTEM:
             if lid == "IMPORTANT" and lid not in labs:
                 continue
+            if imap and lid not in labs and lid not in ("STARRED", "ALLMAIL"):
+                continue                          # Ordner gibt es in diesem Postfach nicht
             cnt = None
             if lid in ("INBOX", "SPAM"):
                 cnt = unread(lid)
@@ -563,18 +598,21 @@ class MailWindow(Gtk.ApplicationWindow):
                           cnt, soft=True, sub=True)
         user = sorted((r for r in labs.values() if r["type"] == "user"), key=lambda r: r["name"].lower())
         if user:
-            self.side.append(tui.label("labels", "ml-place-head"))
+            self.side.append(tui.label("weitere ordner" if imap else "labels", "ml-place-head"))
             for r in user:
-                depth = r["name"].count("/")
-                name = r["name"].rsplit("/", 1)[-1]
-                b = place(r["id"], "\U000F04F9", name, page == "folder" and f == r["id"],
+                sep = "/" if "/" in r["name"] or not imap else "."
+                depth = r["name"].count(sep)
+                name = r["name"].rsplit(sep, 1)[-1]
+                b = place(r["id"], "\U000F024B" if imap else "\U000F04F9", name, page == "folder" and f == r["id"],
                           lambda l=r["id"]: self.go(("folder", l)), r["unread"], soft=True, tip=r["name"])
                 b.set_margin_start(14 * depth)
         self.side.append(tui.label("werkzeuge", "ml-place-head"))
         place(None, "\U000F00E2", "aufräumen", page == "cleanup", lambda: self.go(("cleanup",)),
               tip="Wer schickt am meisten? Alle Mails eines Absenders auf einmal löschen")
-        place(None, "\U000F0004", "konto", page == "account", lambda: self.go(("account",)),
-              tip="Anmeldung, Zwischenspeicher, Abmelden")
+        place(None, "\U000F0004", "konten", page == "account", lambda: self.go(("account",)),
+              tip="Postfächer hinzufügen/wechseln, Anmeldung, Zwischenspeicher, Abmelden")
+        place(None, "\U000F0493", "einstellungen", page == "settings", lambda: self.go(("settings",)),
+              tip="Sicherheit, Verschlüsselung (OpenPGP), Darstellung")
         n = self.st.count_local("ALLMAIL") + self.st.count_local("TRASH") + self.st.count_local("SPAM")
         self.side_foot = tui.label(f"{num(n)} mails · {human_size(self.st.size_on_disk())} lokal", "ml-sidefoot",
                                    wrap=True)
@@ -605,6 +643,58 @@ class MailWindow(Gtk.ApplicationWindow):
         if not ids:
             return None
         return Gdk.ContentProvider.new_for_value(",".join(ids))
+
+    # ================================================================ Konten
+    def switch_account(self):
+        """Anderes Postfach zeigen: alles, was am Zwischenspeicher hängt, neu verbinden."""
+        self.st = self.app.store
+        self.reader.st = self.st
+        self.undo_stack.clear()
+        self.search_ids.clear()
+        self._more_end.clear()
+        self._more_busy = False
+        if self.search.get_text():
+            self._silent_clear_search()
+        start = ("folder", "INBOX") if self.app.acct.backend.logged_in() or self.st.count_local("ALLMAIL") \
+            else ("account",)
+        for t in self.tabs:
+            if t.loc[0] in ("folder", "sender", "search"):
+                t.loc = start
+            t.back.clear()
+            t.fwd.clear()
+        self.show_loc()
+        self.say(f"konto: {self.app.acct.label}")
+
+    def _account_bar(self):
+        """Oben in der Ordnerleiste: alle Konten als Knöpfe (ab zwei Konten), Klick = wechseln."""
+        accs = list(self.app.accounts.values())
+        if len(accs) < 2:
+            return
+        box = tui.vbox(spacing=1)
+        box.add_css_class("ml-accts")
+        for i, a in enumerate(accs):
+            b = Gtk.Button(focus_on_click=False, tooltip_text=f"{a.address or a.label} – Strg+Shift+A wechselt")
+            b.add_css_class("ml-acct")
+            if a is self.app.acct:
+                b.add_css_class("active")
+            glyph = "\U000F02AB" if a.kind == "gmail" else "\U000F01EE"
+            row = tui.hbox(tui.label(glyph, "pglyph"), tui.label(a.label, hexpand=True, ellipsize=True), spacing=8)
+            state = getattr(a, "state", "idle")
+            if state in ("noauth", "expired"):
+                row.append(tui.label("\U000F0026", "ml-count", "warn"))
+            else:
+                u = a.inbox_unread()
+                if u:
+                    c = tui.label(num(u) if u < 10000 else "9999+", "ml-count")
+                    if a is not self.app.acct:
+                        c.add_css_class("soft")
+                    row.append(c)
+            b.set_child(row)
+            b.connect("clicked", lambda *_, aid=a.id: self.app.switch_account(aid))
+            box.append(b)
+        self.side.append(tui.label("konten", "ml-place-head"))
+        self.side.append(box)
+        self.side.append(tui.label("ordner", "ml-place-head"))
 
     # ================================================================ Tabs & Orte
     def new_tab(self, loc, switch=True):
@@ -669,7 +759,7 @@ class MailWindow(Gtk.ApplicationWindow):
             return f"„{loc[1]}“"
         if loc[0] == "sender":
             return loc[2] if len(loc) > 2 and loc[2] else loc[1]
-        return {"cleanup": "aufräumen", "account": "konto"}.get(loc[0], loc[0])
+        return {"cleanup": "aufräumen", "account": "konten", "settings": "einstellungen"}.get(loc[0], loc[0])
 
     def folder_name(self, fid):
         if fid in NAMES:
@@ -749,11 +839,14 @@ class MailWindow(Gtk.ApplicationWindow):
         self.btn_back.set_sensitive(self.can_back())
         self.btn_fwd.set_sensitive(self.can_fwd())
         self._crumbs()
-        if kind in ("cleanup", "account"):
+        if kind in ("cleanup", "account", "settings"):
             self.sel_info.set_label("")
         if kind == "cleanup":
             self.main.set_visible_child_name("cleanup")
             self.cleanup.refresh()
+        elif kind == "settings":
+            self.main.set_visible_child_name("settings")
+            self.settings.refresh()
         elif kind == "account":
             self.main.set_visible_child_name("account")
             self.account.refresh()
@@ -769,7 +862,7 @@ class MailWindow(Gtk.ApplicationWindow):
     def _crumbs(self):
         tui.clear(self.crumbs)
         loc = self.cur.loc
-        parts = ["gmail"]
+        parts = [self.app.acct.label]
         if loc[0] == "folder":
             if loc[1].startswith("CATEGORY_") or loc[1] == "PRIMARY":
                 parts.append("posteingang")
@@ -808,6 +901,7 @@ class MailWindow(Gtk.ApplicationWindow):
         if not self.cur or self.cur.loc[0] not in ("folder", "sender", "search"):
             return
         sel_ids = set(self.selected_ids()) if keep is None else ({keep} if keep else set())
+        had_focus = self._list_focused()       # vor dem Umbau – eine entfernte Zeile hängt danach nirgends mehr
         first_pos = self._first_selected_pos()
         rows = self.rows_for(self.cur.loc)
         old = [self.model.get_item(i).id for i in range(self.model.get_n_items())]
@@ -819,22 +913,27 @@ class MailWindow(Gtk.ApplicationWindow):
         sm = difflib.SequenceMatcher(None, old, new, autojunk=False)
         for tag, i1, i2, j1, j2 in reversed(sm.get_opcodes()):
             if tag == "equal":
-                # geänderte Einträge als neues Objekt einsetzen – GTK zeichnet dasselbe Objekt sonst nicht neu
+                # geänderte Einträge im selben Objekt auffrischen (kein Austausch → Fokus/Scrollstand bleiben)
                 for k in range(i1, i2):
                     r = rows[j1 + (k - i1)]
-                    if tuple(self.model.get_item(k).row) != tuple(r):
-                        self.model.splice(k, 1, [MailItem(r)])
+                    it = self.model.get_item(k)
+                    if tuple(it.row) != tuple(r):
+                        it.update(r)
             else:
                 fresh = []
                 for j in range(j1, j2):
                     it = byid.get(new[j])
-                    fresh.append(it if it is not None and tuple(it.row) == tuple(rows[j]) else MailItem(rows[j]))
+                    if it is None:
+                        it = MailItem(rows[j])
+                    elif tuple(it.row) != tuple(rows[j]):
+                        it.update(rows[j])
+                    fresh.append(it)
                 self.model.splice(i1, i2 - i1, fresh)
         self.list_stack.set_visible_child_name("list" if rows else "empty")
         self._update_foot(len(rows))
         if sel_ids:
             if set(self.selected_ids()) != sel_ids:
-                self.select_ids(sel_ids, fallback=first_pos)
+                self.select_ids(sel_ids, fallback=first_pos, focus=had_focus)
         elif scroll_top:
             self.reader.show_empty(self.loc_title(self.cur.loc))
         if scroll_top:
@@ -849,11 +948,15 @@ class MailWindow(Gtk.ApplicationWindow):
                 bits.append(f"{num(u)} ungelesen")
             r = next((r for r in self.st.labels() if r["id"] == loc[1]), None)
             if r and r["total"] and r["total"] > n:
-                bits.append(f"bei gmail {num(r['total'])}")
+                bits.append(f"auf dem server {num(r['total'])}")
         elif loc[0] == "search" and loc[1] not in self.search_ids:
-            bits.append("nur lokal – enter sucht in ganz gmail")
+            bits.append("nur lokal – enter sucht im ganzen postfach")
         self.foot.set_label(" · ".join(bits))
-        self.more_btn.set_visible(loc[0] == "folder" and gmail.logged_in())
+        self.more_btn.set_visible(loc[0] == "folder" and self.app.acct.backend.logged_in())
+        if loc[0] == "folder" and not self._more_busy:
+            done = loc[1] in self._more_end
+            self.more_btn.set_label("alles geladen" if done else "ältere laden")
+            self.more_btn.set_sensitive(not done)
 
     def refresh(self, soft=True):
         """Nach Abgleich/Änderung: Liste, Ordner, Vorschau auffrischen."""
@@ -869,10 +972,17 @@ class MailWindow(Gtk.ApplicationWindow):
             self.account.refresh()
         self.build_side()
 
+    def _near_end(self, adj):
+        """Automatisch nachladen, wenn man sich dem unteren Ende nähert (weniger als ~1 Seite übrig)."""
+        if adj.get_upper() - adj.get_value() - adj.get_page_size() < max(200, adj.get_page_size()):
+            self.load_more()
+
     def load_more(self, force=False):
-        if self._more_busy or not self.cur or self.cur.loc[0] != "folder" or not gmail.logged_in():
+        if self._more_busy or not self.cur or self.cur.loc[0] != "folder" or not self.app.acct.backend.logged_in():
             return
-        if not force and self.model.get_n_items() < 30:
+        if self.search.get_text().strip():
+            return                                    # gefilterte Liste: Ende heißt nicht „Ordner zu Ende“
+        if not force and (self.model.get_n_items() < 30 or self.cur.loc[1] in self._more_end):
             return
         self._more_busy = True
         self.more_btn.set_label("lädt …")
@@ -880,6 +990,10 @@ class MailWindow(Gtk.ApplicationWindow):
 
     def more_done(self, folder, n, has_more):
         self._more_busy = False
+        if not has_more:
+            self._more_end.add(folder)
+        else:
+            self._more_end.discard(folder)
         self.more_btn.set_label("ältere laden" if has_more else "alles geladen")
         self.more_btn.set_sensitive(has_more)
         if n:
@@ -906,7 +1020,11 @@ class MailWindow(Gtk.ApplicationWindow):
         bs = self.sel.get_selection()
         return bs.get_minimum() if not bs.is_empty() else None
 
-    def select_ids(self, ids, fallback=None, scroll=False):
+    def _list_focused(self):
+        f = self.get_focus()
+        return f is not None and (f is self.cv or f.is_ancestor(self.cv))
+
+    def select_ids(self, ids, fallback=None, scroll=False, focus=None):
         n = self.sorted.get_n_items()
         bs = Gtk.Bitset.new_empty()
         first = None
@@ -918,7 +1036,10 @@ class MailWindow(Gtk.ApplicationWindow):
             first = min(fallback, n - 1)
             bs.add(first)
         self.sel.set_selection(bs, Gtk.Bitset.new_range(0, n))
-        if first is not None and scroll:
+        if first is None:
+            return
+        if scroll or (self._list_focused() if focus is None else focus):
+            # Tastaturfokus mitnehmen – sonst geht der nächste Pfeil von ganz oben los
             self.cv.scroll_to(first, None, Gtk.ListScrollFlags.FOCUS, None)
 
     def reveal(self, mid):
@@ -984,7 +1105,7 @@ class MailWindow(Gtk.ApplicationWindow):
         if compact != self.compact:
             self.compact = compact
             GLib.idle_add(lambda: (self.apply_layout(), False)[1])
-        tier = 2 if width >= 1100 else (1 if width >= 860 else 0)
+        tier = 2 if width >= 1100 else (1 if width >= 860 else (0 if width >= SIDE_HIDE_W else -1))
         if tier != getattr(self, "_tier", None):
             self._tier = tier
             GLib.idle_add(lambda: (self._apply_tier(tier), False)[1])
@@ -998,8 +1119,8 @@ class MailWindow(Gtk.ApplicationWindow):
         self.search.set_width_chars(26 if tier >= 2 else 12)
         self.col_size.set_visible(tier >= 2 and self.prefs.get("col_size", True))
         self.col_from.set_fixed_width(int(self.prefs.get("w_from", 210)) if tier >= 2 else 150)
-        # schmal: Ordnerleiste vorübergehend weg (F9 holt sie), sonst wie eingestellt
-        self.side_panel.set_visible(self.prefs.get("sidebar", True) and (tier >= 1 or self._side_forced))
+        # nur sehr schmal: Ordnerleiste vorübergehend weg (F9 holt sie), sonst wie eingestellt
+        self.side_panel.set_visible(self.prefs.get("sidebar", True) and (tier >= 0 or self._side_forced))
 
     def apply_layout(self):
         preview = self.prefs.get("preview", True)
@@ -1081,7 +1202,7 @@ class MailWindow(Gtk.ApplicationWindow):
         if not ids:
             return
         pages.confirm(self, "endgültig löschen?",
-                      f"{num(len(ids))} {'mail wird' if len(ids) == 1 else 'mails werden'} bei gmail sofort und "
+                      f"{num(len(ids))} {'mail wird' if len(ids) == 1 else 'mails werden'} auf dem server sofort und "
                       f"für immer gelöscht – das lässt sich nicht rückgängig machen.",
                       "endgültig löschen", lambda: self.apply({"op": "delete", "ids": ids},
                                                              f"{num(len(ids))} endgültig gelöscht", undoable=False))
@@ -1175,20 +1296,20 @@ class MailWindow(Gtk.ApplicationWindow):
         q = self.search.get_text().strip()
         if not q:
             return
-        if not gmail.logged_in():
-            self.say("gmail-suche braucht eine anmeldung – zeige nur lokale treffer")
+        if not self.app.acct.backend.logged_in():
+            self.say("server-suche braucht eine anmeldung – zeige nur lokale treffer")
             return
         self._search_token += 1
         self.search_ids.pop(q, None)
         self.go(("search", q))
-        self.say(f"suche „{q}“ in gmail …")
+        self.say(f"suche „{q}“ in {self.app.acct.label} …")
         self.app.syncer.request("search", q, self._search_token)
 
     def search_done(self, token, ids):
         if token != self._search_token or self.cur.loc[0] != "search":
             return
         self.search_ids[self.cur.loc[1]] = ids
-        self.say(f"{len(ids)} treffer in gmail")
+        self.say(f"{len(ids)} treffer in {self.app.acct.label}")
         self.reload(scroll_top=True)
 
     # ================================================================ Rechtsklick
@@ -1286,6 +1407,8 @@ class MailWindow(Gtk.ApplicationWindow):
                 self.app.compose()
             elif k == Gdk.KEY_z and not typing:
                 self.undo()
+            elif k == Gdk.KEY_a and shift:
+                self.app.cycle_account()
             elif k == Gdk.KEY_a and not typing:
                 self.sel.select_all()
                 self.cv.grab_focus()
@@ -1378,12 +1501,12 @@ class MailWindow(Gtk.ApplicationWindow):
         synced = self.st.get("synced")
         when = time.strftime("%H:%M", time.localtime(int(synced))) if synced else ""
         label, tip = {
-            "busy": (f"\U000F04E6 {msg or 'abgleich …'}", "gleicht gerade mit gmail ab"),
+            "busy": (f"\U000F04E6 {msg or 'abgleich …'}", f"gleicht gerade mit {self.app.acct.label} ab"),
             "offline": ("\U000F0B5A offline", f"keine verbindung – änderungen werden später gesendet ({msg or ''})"),
             "expired": ("⚠ neu anmelden", "google hat die anmeldung beendet (testmodus: nach 7 tagen) – klick zum "
                                           "neu anmelden"),
-            "noauth": ("\U000F0004 anmelden", "noch nicht mit gmail verbunden – klick zum einrichten"),
-        }.get(st, (f"\U000F012C {when}" if when else "\U000F012C", "letzter abgleich mit gmail – klick = jetzt"))
+            "noauth": ("\U000F0004 anmelden", f"{self.app.acct.label}: nicht verbunden – klick zum einrichten"),
+        }.get(st, (f"\U000F012C {when}" if when else "\U000F012C", "letzter abgleich – klick = jetzt (alle postfächer)"))
         self.state_btn.set_label(label)
         self.state_btn.set_tooltip_text(tip)
         for c in ("off", "news"):
@@ -1410,7 +1533,7 @@ class MailWindow(Gtk.ApplicationWindow):
         elif e.status == 403:
             self.say(f"gmail verweigert den zugriff: {e} – evtl. neu anmelden", error=True)
         else:
-            self.say(f"gmail: {e}", error=True)
+            self.say(f"{self.app.acct.label}: {e}", error=True)
 
     # ================================================================ Sonstiges
     def open_eml(self, path):

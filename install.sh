@@ -18,12 +18,12 @@ basics_missing() {
     return 0
 }
 if { (( UPDATE )) && basics_missing && say "Es fehlen Systempakete – werden nachinstalliert …"; } \
-   || ask "Systempakete installieren (GTK4, PyGObject)?"; then
+   || ask "Systempakete installieren (GTK4, PyGObject, Schlüsselbund, gpg)?"; then
     pkg_install \
-        "gtk4 python python-gobject python-cairo adwaita-icon-theme xdg-utils libnotify" \
-        "python3 python3-gi python3-gi-cairo gir1.2-gtk-4.0 adwaita-icon-theme xdg-utils libglib2.0-bin libnotify-bin" \
-        "python3 python3-gobject python3-cairo gtk4 adwaita-icon-theme xdg-utils glib2 libnotify" \
-        "python3 python3-gobject python3-gobject-cairo python3-gobject-Gdk typelib-1_0-Gtk-4_0 adwaita-icon-theme xdg-utils glib2-tools libnotify-tools" \
+        "gtk4 python python-gobject python-cairo adwaita-icon-theme xdg-utils libnotify libsecret gnupg" \
+        "python3 python3-gi python3-gi-cairo gir1.2-gtk-4.0 adwaita-icon-theme xdg-utils libglib2.0-bin libnotify-bin gir1.2-secret-1 gnupg" \
+        "python3 python3-gobject python3-cairo gtk4 adwaita-icon-theme xdg-utils glib2 libnotify libsecret gnupg2" \
+        "python3 python3-gobject python3-gobject-cairo python3-gobject-Gdk typelib-1_0-Gtk-4_0 adwaita-icon-theme xdg-utils glib2-tools libnotify-tools typelib-1_0-Secret-1 gpg2" \
         || warn "Paketinstallation nicht vollständig – weiter."
 fi
 echo
