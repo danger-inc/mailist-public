@@ -1,5 +1,14 @@
 # mailist
 
+## 1.3.0 (2026-10-22)
+- **Klick öffnet die Mail**: Ein Klick auf eine Mail öffnet sie groß – die Ordner links bleiben, Liste und
+  Vorschau machen Platz. Zurück mit `Esc`, dem Zurück-Knopf, der Maustaste „zurück“ oder 2-Finger-Wischen. Mit den
+  Pfeiltasten durch die Liste gehen zeigt weiter die Vorschau, `Enter` öffnet. Gilt jetzt auch im großen Fenster.
+- **`F3` schaltet wirklich die Vorschau**: Vorher verschwand im großen Fenster die Mail-Liste statt der Vorschau.
+- **Externe Bilder laden**: Bei Mails mit Bildern aus dem Netz steht oben „N externe bilder nicht geladen ·
+  laden“ – ein Klick holt sie in die Mail. Unter Einstellungen → allgemein lässt sich **„externe bilder automatisch
+  laden“** einschalten (Standard: aus). Tracker-Pixel bleiben immer blockiert.
+
 ## 1.2.0 (2026-10-21)
 - **Neu: mehrere Postfächer.** Unter „konten“ beliebig viele hinzufügen – weitere Gmail-Konten und jedes
   Postfach mit **IMAP/SMTP** (GMX, web.de, Outlook, Posteo, mailbox.org, iCloud werden an der Adresse erkannt).

@@ -7,7 +7,7 @@ import datetime as dt, difflib, os, time
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
-from gi.repository import Gdk, Gio, GLib, GObject, Gtk, Pango
+from gi.repository import Gdk, Gio, GLib, GObject, Graphene, Gtk, Pango
 
 import glass
 import gmail
@@ -121,7 +121,7 @@ class MailWindow(Gtk.ApplicationWindow):
         self.theme = tui.Theme.get()
         self.tabs, self.cur = [], None
         self.undo_stack = []
-        self.reading = False           # schmales Fenster: Vorschau statt Liste
+        self.reading = False           # Mail groß geöffnet (Liste und Vorschau weg, Ordner bleiben)
         self.compact = None
         self._status_id = None
         self._sel_timer = None
@@ -323,7 +323,7 @@ class MailWindow(Gtk.ApplicationWindow):
             self.chk[key] = c
             box.append(c)
         check("sidebar", "ordner-leiste  (f9)", True, lambda v: self.side_panel.set_visible(v))
-        check("preview", "vorschau  (f3)", True, lambda v: self.apply_layout())
+        check("preview", "vorschau  (f3)", True, lambda v: self.set_reading(False) if self.reading else self.apply_layout())
         check("col_size", "spalte größe", True, lambda v: self.col_size.set_visible(v))
         check("notify", "neue mails melden", True)
         check("mark_read", "beim lesen als gelesen markieren", True)
@@ -517,6 +517,11 @@ class MailWindow(Gtk.ApplicationWindow):
         right = Gtk.GestureClick(button=3)
         right.connect("pressed", self._right_click)
         self.cv.add_controller(right)
+        # Einfacher Linksklick auf eine Zeile öffnet die Mail. Legacy-Controller in der Capture-Phase, weil die
+        # Zeilen den Klick selbst beanspruchen (eine GestureClick am ColumnView bekäme kein „released“).
+        legacy = Gtk.EventControllerLegacy(propagation_phase=Gtk.PropagationPhase.CAPTURE)
+        legacy.connect("event", self._list_event)
+        self.cv.add_controller(legacy)
         drag = Gtk.DragSource(actions=Gdk.DragAction.MOVE)
         drag.connect("prepare", self._drag_prepare)
         self.cv.add_controller(drag)
@@ -801,13 +806,13 @@ class MailWindow(Gtk.ApplicationWindow):
         self.show_loc()
 
     def can_back(self):
-        return bool(self.reading and self.compact) or bool(self.cur and self.cur.back)
+        return bool(self.reading) or bool(self.cur and self.cur.back)
 
     def can_fwd(self):
         return bool(self.cur and self.cur.fwd)
 
     def go_back(self):
-        if self.reading and self.compact:
+        if self.reading:
             self.set_reading(False)
             return
         t = self.cur
@@ -828,10 +833,10 @@ class MailWindow(Gtk.ApplicationWindow):
     def _where(self):
         if not self.cur:
             return None, None
-        return loc_key(self.cur.loc) + ("|r" if self.reading and self.compact else ""), self.loc_title(self.cur.loc)
+        return loc_key(self.cur.loc) + ("|r" if self.reading else ""), self.loc_title(self.cur.loc)
 
     def _target(self):
-        if self.reading and self.compact:
+        if self.reading:
             return loc_key(self.cur.loc), self.loc_title(self.cur.loc)
         if self.cur and self.cur.back:
             loc = self.cur.back[-1][0]
@@ -864,6 +869,7 @@ class MailWindow(Gtk.ApplicationWindow):
             self.account.refresh()
         else:
             self.main.set_visible_child_name("mail")
+            self.reading = False               # anderer Ordner: wieder Liste (+ Vorschau)
             self.list_panel.set_title(self.loc_title(t.loc))
             self.reload(keep=keep, scroll_top=True)
             self.empty_trash_btn.set_visible(kind == "folder" and t.loc[1] in ("TRASH", "SPAM"))
@@ -1084,6 +1090,56 @@ class MailWindow(Gtk.ApplicationWindow):
             self.sel_info.set_label("")
         return False
 
+    def _list_event(self, _c, ev):
+        t = ev.get_event_type()
+        if t == Gdk.EventType.BUTTON_PRESS and ev.get_button() == 1:
+            ok, x, y = ev.get_position()
+            self._press = (x, y, ev.get_modifier_state(), self.cv.pick(*self._local(ev), Gtk.PickFlags.DEFAULT))
+        elif t == Gdk.EventType.BUTTON_RELEASE and ev.get_button() == 1 and getattr(self, "_press", None):
+            px, py, mods, w = self._press
+            self._press = None
+            ok, x, y = ev.get_position()
+            if abs(x - px) > 6 or abs(y - py) > 6:              # gezogen (z. B. in einen Ordner)
+                return False
+            if mods & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK):
+                return False                                    # Mehrfachauswahl
+            row = w
+            while row is not None and row is not self.cv:
+                if isinstance(row, (Gtk.Button, Gtk.CheckButton)):
+                    return False                                # Knopf in der Zeile (Papierkorb …)
+                if type(row).__name__ == "GtkColumnViewTitle" or row.get_css_name() == "header":
+                    return False                                # Spaltenkopf (Sortieren)
+                if row.get_css_name() == "row":
+                    break
+                row = row.get_parent()
+            if row is None or row is self.cv:
+                return False
+            GLib.timeout_add(30, self._click_open)
+        return False
+
+    def _local(self, ev):
+        """Ereignis-Koordinaten (Fläche) → ColumnView-Koordinaten."""
+        ok, x, y = ev.get_position()
+        native = self.cv.get_native()
+        nx, ny = native.get_surface_transform()
+        ok, p = native.compute_point(self.cv, Graphene.Point().init(x - nx, y - ny))
+        return (p.x, p.y) if ok else (-1, -1)
+
+    def _click_open(self):
+        ids = self.selected_ids()
+        if len(ids) != 1:
+            return False
+        it = next((self.sorted.get_item(i) for i in range(self.sorted.get_n_items())
+                   if self.sorted.get_item(i).id == ids[0]), None)
+        if it is not None and " DRAFT " in (it.row["labels"] or ""):
+            self.reader.edit_draft()
+            return False
+        if self._sel_timer:                     # Vorschau sofort laden, nicht erst nach 90 ms
+            GLib.source_remove(self._sel_timer)
+            self._sel_settled()
+        self.set_reading(True)
+        return False
+
     def _activate(self, pos):
         it = self.sorted.get_item(pos)
         if not it:
@@ -1136,14 +1192,17 @@ class MailWindow(Gtk.ApplicationWindow):
 
     def apply_layout(self):
         preview = self.prefs.get("preview", True)
-        if self.compact or not preview:
-            reading = self.reading
-            self.list_panel.set_visible(not reading)
-            self.read_panel.set_visible(reading)
+        if self.reading:                       # Mail geöffnet: nimmt den ganzen Platz neben den Ordnern
+            self.list_panel.set_visible(False)
+            self.read_panel.set_visible(True)
+        elif self.compact or not preview:
+            self.list_panel.set_visible(True)
+            self.read_panel.set_visible(False)
         else:
             self.list_panel.set_visible(True)
             self.read_panel.set_visible(True)
             self._fit_split()
+        self.reader.update_title()
         self.btn_back.set_sensitive(self.can_back())
 
     def _fit_split(self):
@@ -1396,7 +1455,7 @@ class MailWindow(Gtk.ApplicationWindow):
                     self.search.set_text("")
                 self.cv.grab_focus()
                 return True
-            if self.reading and (self.compact or not self.prefs.get("preview", True)):
+            if self.reading:
                 self.set_reading(False)
                 return True
             if self.reader.focused():
@@ -1453,11 +1512,14 @@ class MailWindow(Gtk.ApplicationWindow):
             self.app.set_pref("sidebar", on)
             self.chk["sidebar"].set_active(on)
             return True
-        if kv == Gdk.KEY_F3:
+        if kv == Gdk.KEY_F3:                   # nur die Vorschau neben der Liste – die Liste bleibt immer sichtbar
             on = not self.prefs.get("preview", True)
             self.app.set_pref("preview", on)
             self.chk["preview"].set_active(on)
-            self.apply_layout()
+            if self.reading:
+                self.set_reading(False)
+            else:
+                self.apply_layout()
             return True
         if typing:
             return False
@@ -1569,7 +1631,7 @@ class MailWindow(Gtk.ApplicationWindow):
 
     def _on_close(self, *_):
         self.save_state()
-        self.set_reading(False) if self.compact else None
+        self.set_reading(False)
         GLib.timeout_add(1500, lambda: (tui.trim_memory(), False)[1])
         return False
 

@@ -80,7 +80,8 @@ class Mail:
                 pass
             segs = r.result()
             if sum(len(s[0]) for s in segs) > 20 or not self.plain:
-                return segs, {"links": r.links, "remote_images": r.remote, "trackers": r.trackers, "html": True}
+                return segs, {"links": r.links, "remote_images": r.remote, "trackers": r.trackers, "html": True,
+                              "images": r.images}
         segs, links = plain_segments(self.plain or "")
         return segs, {"links": links, "remote_images": 0, "trackers": 0, "html": False}
 
@@ -136,6 +137,7 @@ class HtmlText(html.parser.HTMLParser):
         self.links = []
         self.remote = 0
         self.trackers = 0
+        self.images = []       # externe Bilder (ohne Tracker) in Textreihenfolge – Platzhalter „\u200b“ mit Stil rimg
         self.pre = 0
         self.lists = []        # ["ul"|("ol", n)]
         self.need_space = False
@@ -304,11 +306,13 @@ class HtmlText(html.parser.HTMLParser):
         if hidden or tiny or re.search(r"(track|pixel|beacon|open\.|/o/|/open|wf/open|e\.gif)", src, re.I):
             self.trackers += 1
             return
+        self.images.append("https:" + src if src.startswith("//") else src)
+        self.out.append(("\u200b", frozenset({"rimg"}), self.href))      # wird beim Laden durch das Bild ersetzt
         alt = (a.get("alt") or "").strip()
         if alt and len(alt) < 80:
-            self.out.append((f"[{alt}]", frozenset({"img"}), self.href))
+            self.out.append((f"[{alt}]", frozenset({"img", "ialt"}), self.href))
         elif self.href:
-            self.out.append(("[bild]", frozenset({"img"}), self.href))
+            self.out.append(("[bild]", frozenset({"img", "ialt"}), self.href))
 
     def result(self):
         segs = []

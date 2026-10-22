@@ -818,12 +818,16 @@ class Settings(Gtk.Box):
         tui.clear(self.inner)
         self.section("allgemein")
         self.check("sidebar", "ordner-leiste zeigen (f9)", True, cb=lambda v: w.side_panel.set_visible(v))
-        self.check("preview", "vorschau neben der liste (f3)", True, cb=lambda v: w.apply_layout())
+        self.check("preview", "vorschau neben der liste (f3)", True, cb=lambda v: w.set_reading(False) if w.reading else w.apply_layout())
         self.check("col_size", "spalte „größe“", True, cb=lambda v: w.col_size.set_visible(v))
         self.check("notify", "neue mails melden (alle postfächer)", True)
         self.check("mark_read", "beim lesen als gelesen markieren", True)
         self.check("html", "html-mails formatiert zeigen", True, cb=lambda v: w.reader.rerender(),
-                   help_="Aus: nur die Textfassung. Externe Bilder lädt mailist so oder so nie (Tracking).")
+                   help_="Aus: nur die Textfassung.")
+        self.check("load_images", "externe bilder automatisch laden", False, cb=lambda v: w.reader.rerender(),
+                   help_="Aus: Bilder aus dem Netz erst nach Klick auf „laden“ in der Mail. An: sofort – der "
+                         "Absender sieht dann, dass und wann du die Mail geöffnet hast. Tracker-Pixel bleiben "
+                         "immer blockiert.")
 
         self.section("sicherheit beim lesen")
         self.check("sec_check", "sicherheits-check jeder mail", True,

@@ -6,7 +6,7 @@ import concurrent.futures, email.utils, json, os, re, subprocess, tempfile
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
-from gi.repository import Gdk, Gio, GLib, Gtk, Pango
+from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, Pango
 
 import gmail
 import guard
@@ -16,6 +16,36 @@ import store as stmod
 import tui
 
 _pool = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="mailist-body")
+_img_pool = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="mailist-img")
+_img_cache = {}          # url → GdkPixbuf.Pixbuf (None = kein Bild/Tracker), begrenzt
+IMG_LIMIT = 8_000_000
+IMG_MAX = 60             # mehr Bilder pro Mail lädt mailist nicht
+
+
+def fetch_image(url):
+    """Externes Bild holen (läuft im Thread) → Pixbuf, "px" (1×1-Zählpixel) oder None (zu groß, kein Bild)."""
+    if url in _img_cache:
+        return _img_cache[url]
+    import urllib.request
+    pb = None
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) mailist",
+                                                   "Accept": "image/*"})
+        with urllib.request.urlopen(req, timeout=12) as r:
+            data = r.read(IMG_LIMIT + 1)
+        if len(data) <= IMG_LIMIT:
+            loader = GdkPixbuf.PixbufLoader()
+            loader.write(data)
+            loader.close()
+            pb = loader.get_pixbuf()
+            if pb is not None and (pb.get_width() <= 2 or pb.get_height() <= 2):
+                pb = "px"                              # Zählpixel
+    except Exception:
+        pb = None
+    if len(_img_cache) > 300:
+        _img_cache.clear()
+    _img_cache[url] = pb
+    return pb
 CACHE = stmod.CACHE
 
 
@@ -190,6 +220,17 @@ class Reader(Gtk.Box):
         self.text.add_controller(motion)
         self.spinner = tui.label("", "ml-meta")
         box.append(self.spinner)
+        # Externe Bilder: Hinweis + „laden“ (automatisch nur, wenn in den Einstellungen an)
+        self.img_lbl = tui.label("", "ml-meta", hexpand=True, xalign=0, ellipsize=True)
+        self.img_btn = Gtk.Button(label="laden", focus_on_click=False,
+                                  tooltip_text="Externe Bilder dieser Mail laden – der Absender sieht dann, dass und "
+                                               "wann du sie geöffnet hast. Tracker-Pixel bleiben blockiert.")
+        self.img_btn.add_css_class("ml-link")
+        self.img_btn.connect("clicked", lambda *_: self.load_images())
+        self.img_bar = tui.hbox(self.img_lbl, self.img_btn, spacing=8)
+        self.img_bar.set_visible(False)
+        box.append(self.img_bar)
+        self._img_urls, self._img_pos, self._img_token = [], [], None
         box.append(self.text)
 
         self.att_box = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, max_children_per_line=6, row_spacing=4,
@@ -220,6 +261,10 @@ class Reader(Gtk.Box):
         self.buf.create_tag("strike", strikethrough=True)
         self.buf.create_tag("bullet", foreground_rgba=prim, weight=Pango.Weight.BOLD)
         self.buf.create_tag("img", foreground_rgba=sec, style=Pango.Style.ITALIC, scale=0.9)
+        if not tt.lookup("rimg"):
+            self.buf.create_tag("rimg")
+            self.buf.create_tag("ialt")
+            self.buf.create_tag("hidden", invisible=True)
 
     def rerender(self):
         self._make_tags()
@@ -227,7 +272,20 @@ class Reader(Gtk.Box):
             self._render_body()
 
     # ================================================================ Anzeigen
+    def update_title(self):
+        """Panel-Titel: „vorschau“ neben der Liste, der Betreff, wenn die Mail groß offen ist."""
+        if self.row is None or self.stack.get_visible_child_name() != "mail":
+            return
+        w = self.win
+        w.read_panel.set_title((self.row["subject"] or "mail")[:40] if w.reading else "vorschau")
+
+    def _reset_images(self):
+        self._img_token = None
+        self._img_urls, self._img_pos = [], []
+        self.img_bar.set_visible(False)
+
     def show_empty(self, where=""):
+        self._reset_images()
         self.mid = None
         self.row = None
         self.mail = None
@@ -240,6 +298,8 @@ class Reader(Gtk.Box):
         if row is None:
             return
         same = mid == self.mid
+        if not same:
+            self._reset_images()
         self.mid, self.row = mid, row
         self.stack.set_visible_child_name("mail")
         self._header(row)
@@ -385,11 +445,15 @@ class Reader(Gtk.Box):
         self._guard(lvl, why)
         self.buf.set_text("")
         self.links = []
+        self._img_token = None                 # noch laufende Bild-Downloads der vorigen Mail verwerfen
+        self._img_urls, self._img_pos = list(info.get("images") or []), []
         it = self.buf.get_end_iter()
         for text, styles, href in segs:
             tags = [s for s in styles if s in ("bold", "italic", "h1", "h2", "quote", "mono", "small", "strike",
-                                               "bullet", "img")]
+                                               "bullet", "img", "rimg", "ialt")]
             start = it.get_offset()
+            if "rimg" in styles:
+                self._img_pos.extend(range(start, start + len(text)))
             if href:
                 tags.append("linkwarn" if href in self.link_warn else "link")
             self.buf.insert_with_tags_by_name(it, text, *tags) if tags else self.buf.insert(it, text)
@@ -397,11 +461,80 @@ class Reader(Gtk.Box):
                 self.links.append((start, it.get_offset(), href))
         if not segs:
             self.buf.insert(it, "(kein text)")
+        self._img_trackers = info.get("trackers", 0)
+        self.img_bar.set_visible(False)
         if info.get("remote_images"):
-            n = info["remote_images"]
-            self.spinner.set_label(f"\U000F0976 {n} externe {'bild' if n == 1 else 'bilder'} nicht geladen"
-                                   + (f" · {info['trackers']} tracker blockiert" if info.get("trackers") else ""))
-            self.spinner.set_visible(True)
+            if self._img_urls and self.win.prefs.get("load_images", False):
+                self.load_images()
+            else:
+                n = info["remote_images"]
+                self.img_lbl.set_label(f"\U000F0976 {n} externe {'bild' if n == 1 else 'bilder'} nicht geladen"
+                                       + (f" · {info['trackers']} tracker blockiert" if info.get("trackers") else ""))
+                self.img_btn.set_visible(bool(self._img_urls))
+                self.img_bar.set_visible(True)
+
+    # ================================================================ Externe Bilder
+    def load_images(self):
+        urls = self._img_urls[:IMG_MAX]
+        if not urls or len(self._img_pos) < len(urls):
+            return
+        token = self._img_token = object()
+        state = {"left": len(urls), "ok": 0, "px": 0}
+        self.img_btn.set_visible(False)
+        self.img_lbl.set_label(f"\U000F04E6 lade {len(urls)} {'bild' if len(urls) == 1 else 'bilder'} …")
+        self.img_bar.set_visible(True)
+        for i, url in enumerate(urls):
+            fut = _img_pool.submit(fetch_image, url)
+            fut.add_done_callback(lambda f, i=i: GLib.idle_add(self._image_done, token, i, f, state))
+
+    def _image_done(self, token, i, fut, state):
+        if token is not self._img_token:
+            return False
+        state["left"] -= 1
+        try:
+            pb = fut.result()
+        except Exception:
+            pb = None
+        if pb == "px":
+            state["px"] += 1
+        elif pb is not None and self._place_image(self._img_pos[i], pb):
+            state["ok"] += 1
+        if state["left"] <= 0:
+            tr = self._img_trackers + state["px"]
+            if state["ok"] == len(self._img_urls[:IMG_MAX]) and not tr:
+                self.img_bar.set_visible(False)
+            else:
+                miss = len(self._img_urls[:IMG_MAX]) - state["ok"] - state["px"]
+                self.img_lbl.set_label("\U000F0976 " + " · ".join(
+                    x for x in ((f"{miss} nicht ladbar" if miss else ""), (f"{tr} tracker blockiert" if tr else ""))
+                    if x))
+        return False
+
+    def _place_image(self, off, pb):
+        buf = self.buf
+        it = buf.get_iter_at_offset(off)
+        e = it.copy()
+        e.forward_char()
+        if buf.get_text(it, e, True) != "\u200b" or not it.has_tag(buf.get_tag_table().lookup("rimg")):
+            return False
+        maxw = max(160, min(720, self.text.get_width() - 24))
+        w, h = pb.get_width(), pb.get_height()
+        if w > maxw:
+            pb = pb.scale_simple(maxw, max(1, int(h * maxw / w)), GdkPixbuf.InterpType.BILINEAR)
+        tex = Gdk.Texture.new_for_pixbuf(pb)
+        tags = [t for t in it.get_tags()]
+        buf.delete(it, e)
+        it = buf.get_iter_at_offset(off)
+        buf.insert_paintable(it, tex)
+        s, e = buf.get_iter_at_offset(off), buf.get_iter_at_offset(off + 1)
+        for t in tags:
+            buf.apply_tag(t, s, e)
+        alt = buf.get_tag_table().lookup("ialt")
+        if e.has_tag(alt):                     # „[alt-text]“ hinter dem Bild ausblenden
+            end = e.copy()
+            end.forward_to_tag_toggle(alt)
+            buf.apply_tag_by_name("hidden", e, end)
+        return True
 
     def _header(self, r):
         self.subject.set_label(r["subject"] or "(ohne betreff)")
@@ -429,7 +562,7 @@ class Reader(Gtk.Box):
         self.read_btn.set_tooltip_text("als ungelesen markieren (u)" if not r["unread"] else "als gelesen markieren (u)")
         self.star_btn.get_child().get_first_child().set_label("\U000F04CE" if r["starred"] else "\U000F04D2")
         (self.star_btn.add_css_class if r["starred"] else self.star_btn.remove_css_class)("on")
-        self.win.read_panel.set_title("vorschau" if not self.win.compact else (r["subject"] or "mail")[:40])
+        self.update_title()
         for n in self.tool_names:
             n.set_visible(self.get_width() > 520 or self.get_width() == 0)
 
@@ -533,6 +666,7 @@ class Reader(Gtk.Box):
     def show_bulk(self, ids):
         import pages
         from window import human_size, num
+        self._reset_images()
         self.mid = None
         self.mail = None
         tui.clear(self.bulk)
