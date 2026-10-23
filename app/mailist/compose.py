@@ -17,11 +17,16 @@ DRAFTS = os.path.join(stmod.CACHE, "entwurf.txt")
 
 def parse_mailto(uri):
     u = urllib.parse.urlsplit(uri)
-    q = {k.lower(): v for k, v in urllib.parse.parse_qsl(u.query)}
+    pairs = urllib.parse.parse_qsl(u.query)
+    q = {k.lower(): v for k, v in pairs}
     to = urllib.parse.unquote(u.path)
     if q.get("to"):
         to = ", ".join(x for x in (to, q["to"]) if x)
-    return {"to": to, "cc": q.get("cc", ""), "subject": q.get("subject", ""), "body": q.get("body", "")}
+    # Anhänge (attach=/attachment=, mehrfach; Pfad oder file://) – z. B. „per mail teilen“ aus filist
+    files = [v[7:] if v.startswith("file://") else v for k, v in pairs if k.lower() in ("attach", "attachment")]
+    files = [urllib.parse.unquote(v) if v.startswith("/") and "%" in v else v for v in files]
+    return {"to": to, "cc": q.get("cc", ""), "subject": q.get("subject", ""), "body": q.get("body", ""),
+            "files": files}
 
 
 def quote(mail, row):
@@ -175,6 +180,8 @@ class ComposeWindow(Gtk.ApplicationWindow):
                 self.cc_row.set_visible(True)
             self.subject.set_text(d["subject"])
             buf.set_text(d["body"])
+            for path in d["files"]:
+                self._add_path(os.path.expanduser(path))
         if not r or not m:
             self.subject.grab_focus() if self.to.get_text() else self.to.grab_focus()
             return
