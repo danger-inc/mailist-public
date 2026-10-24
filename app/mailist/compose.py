@@ -9,6 +9,9 @@ from gi.repository import Gdk, Gio, GLib, Gtk
 import glass
 import pgp
 import richtext
+import spell
+import translate
+import linguist_link
 import store as stmod
 import tui
 
@@ -62,7 +65,8 @@ class ComposeWindow(Gtk.ApplicationWindow):
 
         top = tui.hbox(spacing=8)
         top.add_css_class("topbar")
-        top.append(tui.label("mailist", "brand"))
+        self.brand = tui.label("mailist", "brand")
+        top.append(self.brand)
         self.title_lbl = tui.label("neue mail", "accent")
         top.append(self.title_lbl)
         top.append(tui.label("", hexpand=True))
@@ -101,6 +105,18 @@ class ComposeWindow(Gtk.ApplicationWindow):
             b.add_css_class("ml-link")
             b.connect("clicked", lambda *_, cb=cb: cb())
             more.append(b)
+        self.spell_btn = Gtk.Button(label="\U000F04C6 rechtschreibung", focus_on_click=False,
+                                    tooltip_text="Rechtschreibprüfung Deutsch + Englisch (Rechtsklick auf ein rotes Wort)")
+        self.trx_btn = Gtk.Button(label="\U000F05CA übersetzer", focus_on_click=False,
+                                  tooltip_text="Übersetzer Deutsch ⇄ Englisch (Strg+Umschalt+T)")
+        self.spell_btn.connect("clicked", lambda *_: self._toggle_spell())
+        self.trx_btn.connect("clicked", lambda *_: self._trx_click())
+        gc = Gtk.GestureClick(button=3)                      # Rechtsklick: linguist-Einstellungen (nur im Hover-Modus)
+        gc.connect("pressed", lambda *_: linguist_link.hover_enabled() and linguist_link.launch("--settings"))
+        self.trx_btn.add_controller(gc)
+        for b in (self.spell_btn, self.trx_btn):
+            b.add_css_class("ml-link")
+            more.append(b)
         more.append(tui.label("", hexpand=True))
         self.info = tui.label("", "ml-meta")
         more.append(self.info)
@@ -114,16 +130,18 @@ class ComposeWindow(Gtk.ApplicationWindow):
         pgp_on = app.pref("pgp_on", True) and pgp.available()
         self.sign_btn.set_visible(pgp_on)
         self.enc_btn.set_visible(pgp_on)
-        form.append(more)
+        form.append(Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.EXTERNAL, vscrollbar_policy=Gtk.PolicyType.NEVER,
+                                       propagate_natural_height=True, child=more))
         self.att_box = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, max_children_per_line=5, row_spacing=4,
-                                   column_spacing=4)
+                                   column_spacing=4, homogeneous=False, valign=Gtk.Align.START, vexpand=False, visible=False)
         self.att_box.add_css_class("ml-attrow")
         form.append(self.att_box)
         self.body = Gtk.TextView(wrap_mode=Gtk.WrapMode.WORD_CHAR, vexpand=True, left_margin=4, top_margin=6,
                                  bottom_margin=20, accepts_tab=False)
         self.body.add_css_class("ml-edit")
         self.fmt = richtext.Formatter(self.body, self)
-        form.append(self.fmt.bar)
+        form.append(Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.EXTERNAL, vscrollbar_policy=Gtk.PolicyType.NEVER,
+                                       propagate_natural_height=True, child=self.fmt.bar))
         sc = Gtk.ScrolledWindow(child=self.body, vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
         form.append(sc)
         panel = tui.Panel("mail", form)
@@ -135,10 +153,32 @@ class ComposeWindow(Gtk.ApplicationWindow):
                           tui.label("strg+k", "accent"), tui.label("link", "dim"),
                           tui.label("esc", "accent"), tui.label("schließen", "dim"), spacing=6)
         status.add_css_class("statusbar")
-        content = tui.vbox(Gtk.WindowHandle(child=top), panel, status, spacing=0)
+        status = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.EXTERNAL, vscrollbar_policy=Gtk.PolicyType.NEVER,
+                                    propagate_natural_height=True, child=status)
+        # Kopfzeile darf das Fenster nicht aufweiten; in schmalen Fenstern weichen Marke/Titel/Absender
+        top_sc = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.EXTERNAL, vscrollbar_policy=Gtk.PolicyType.NEVER,
+                                    propagate_natural_height=True, child=top)
+        self._narrow = None
+        self.add_tick_callback(self._fit_top)
+        content = tui.vbox(Gtk.WindowHandle(child=top_sc), panel, status, spacing=0)
         panel.set_margin_start(14)
         panel.set_margin_end(14)
-        self.set_child(content)
+        # Übersetzer aus notist: schwebt unten rechts über dem Text
+        self.translator = translate.Translator(app.prefs, lambda: app.set_pref("translator", app.prefs.get("translator", {})))
+        self.translator.on_toggled = self._trx_toggled
+        self.linguist_mon = linguist_link.watch(self._sync_trx)
+        self._sync_trx()
+        over = Gtk.Overlay(child=content)
+        over.add_overlay(self.translator)
+        self.set_child(over)
+        # Rechtschreibung (Deutsch + Englisch), zitierte Zeilen („> …“) und Adressen bleiben ungeprüft
+        spell.set_langs(app.pref("spell_langs", list(spell.DEFAULT_LANGS)))
+        self.spell = spell.SpellCheck(self.body, lambda: self.app.pref("spell", True) and spell.speller().available,
+                                      self._spell_skip)
+        self._spell_button()
+        self.subject_keys = Gtk.EventControllerKey(propagation_phase=Gtk.PropagationPhase.CAPTURE)
+        self.subject_keys.connect("key-pressed", self._subject_key)
+        self.subject.add_controller(self.subject_keys)
 
         # Vorschläge für Adressen
         self.sugg = Gtk.Popover(has_arrow=False, autohide=False, can_focus=False)
@@ -158,8 +198,12 @@ class ComposeWindow(Gtk.ApplicationWindow):
         keys = Gtk.EventControllerKey(propagation_phase=Gtk.PropagationPhase.CAPTURE)
         keys.connect("key-pressed", self._key)
         self.add_controller(keys)
-        drop = Gtk.DropTarget.new(Gdk.FileList, Gdk.DragAction.COPY)
+        # Dateien (z. B. aus filist) ziehen: CAPTURE, sonst nimmt die TextView den Drop als Text
+        drop = Gtk.DropTarget.new(Gdk.FileList, Gdk.DragAction.COPY | Gdk.DragAction.MOVE | Gdk.DragAction.LINK)
+        drop.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
         drop.connect("drop", self._drop)
+        drop.connect("enter", lambda *_: (self.panel.add_css_class("ml-dropping"), Gdk.DragAction.COPY)[1])
+        drop.connect("leave", lambda *_: self.panel.remove_css_class("ml-dropping"))
         self.add_controller(drop)
         self.connect("close-request", self._closing)
         for e in (self.to, self.cc, self.bcc):
@@ -230,6 +274,80 @@ class ComposeWindow(Gtk.ApplicationWindow):
                 self.add_file(name, m.payload(part), ctype)
             self.title_lbl.set_label("entwurf")
         self.set_title(f"mailist · {self.title_lbl.get_label()}")
+
+    def _fit_top(self, *_):
+        narrow = self.get_width() < 560
+        if narrow != self._narrow:
+            self._narrow = narrow
+            self.brand.set_visible(not narrow)
+            self.title_lbl.set_visible(not narrow)
+            self.from_btn.set_visible(not narrow and len(self.app.accounts) > 1 and self.mode == "new")
+        return True
+
+    # ---------------- Betreff → Text, Rechtschreibung, Übersetzer
+    def _subject_key(self, _c, kv, _code, state):
+        if kv == Gdk.KEY_Tab and not state & (Gdk.ModifierType.SHIFT_MASK | Gdk.ModifierType.CONTROL_MASK):
+            self.body.grab_focus()
+            return True
+        return False
+
+    @staticmethod
+    def _spell_skip(text):
+        return [(m.start(), m.end()) for m in re.finditer(r"^>.*$", text, re.M)]
+
+    def _spell_button(self):
+        sp = spell.speller()
+        on = self.app.pref("spell", True) and sp.available
+        (self.spell_btn.add_css_class if on else self.spell_btn.remove_css_class)("on")
+        if not sp.available:
+            self.spell_btn.set_tooltip_text(f"Wörterbücher fehlen: {spell.INSTALL_HINT}")
+        self.spell.queue(0)
+
+    def _toggle_spell(self):
+        on = not self.app.pref("spell", True)
+        if on and not spell.speller().available:
+            self.info.set_label(f"✗ wörterbücher fehlen: {spell.INSTALL_HINT}")
+        self.app.set_pref("spell", on)
+        buf = self.body.get_buffer()
+        if not on:
+            buf.remove_tag_by_name("spell-err", buf.get_start_iter(), buf.get_end_iter())
+        self._spell_button()
+
+    def _toggle_trx(self, on=None):
+        text = None
+        buf = self.body.get_buffer()
+        if buf.get_has_selection():
+            a, b = buf.get_selection_bounds()
+            text = buf.get_text(a, b, False)
+        if linguist_link.hover_enabled():
+            linguist_link.popup(text)            # Strg+Umschalt+T: Karte von linguist, mit markiertem Text
+            return
+        self.translator.toggle(on, text)
+
+    def _trx_click(self):
+        if linguist_link.hover_enabled():        # Knopf: Hover-Übersetzer (linguist) an/aus
+            linguist_link.set_hover_active(not linguist_link.hover_active())
+        else:
+            self._toggle_trx()
+
+    def _sync_trx(self):
+        """Knopf „übersetzer“: Hover-Übersetzer (linguist) aktiviert → zeigt, ob er an ist; sonst wie immer."""
+        if linguist_link.hover_enabled():
+            on = linguist_link.hover_active()
+            self.trx_btn.set_label("\U000F05CA übersetzer ◢")
+            self.trx_btn.set_tooltip_text("Hover-Übersetzer " + ("an" if on else "aus") + ": Maus in die Bildschirmecke "
+                                          "→ linguist (Klick: an/aus, Rechtsklick: Einstellungen, "
+                                          "Strg+Umschalt+T: markierten Text übersetzen)")
+            (self.trx_btn.add_css_class if on else self.trx_btn.remove_css_class)("on")
+        else:
+            self.trx_btn.set_label("\U000F05CA übersetzer")
+            self.trx_btn.set_tooltip_text("Übersetzer Deutsch ⇄ Englisch (Strg+Umschalt+T)")
+            (self.trx_btn.add_css_class if self.translator.is_open() else self.trx_btn.remove_css_class)("on")
+
+    def _trx_toggled(self, on):
+        self._sync_trx()
+        if not on:
+            self.body.grab_focus()
 
     # ---------------- Absender & OpenPGP
     def _show_from(self):
@@ -318,6 +436,7 @@ class ComposeWindow(Gtk.ApplicationWindow):
         dlg.open_multiple(self, None, done)
 
     def _drop(self, _t, value, x, y):
+        self.panel.remove_css_class("ml-dropping")
         for f in value.get_files():
             if f.get_path():
                 self._add_path(f.get_path())
@@ -336,7 +455,7 @@ class ComposeWindow(Gtk.ApplicationWindow):
     def add_file(self, name, data, ctype):
         from window import human_size
         self.files.append((name, data, ctype))
-        b = Gtk.Button(focus_on_click=False, tooltip_text="klick = entfernen")
+        b = Gtk.Button(focus_on_click=False, tooltip_text="klick = entfernen", halign=Gtk.Align.START)
         b.add_css_class("ml-chip")
         b.set_child(tui.hbox(tui.label("\U000F03E2", "accent"), tui.label(name[:36]), tui.label(human_size(len(data)),
                                                                                                  "ml-meta"),
@@ -344,6 +463,7 @@ class ComposeWindow(Gtk.ApplicationWindow):
         entry = (name, data, ctype)
         b.connect("clicked", lambda *_: self._remove_file(b, entry))
         self.att_box.append(b)
+        self.att_box.set_visible(True)
         self._size_info()
 
     def _remove_file(self, btn, entry):
@@ -351,6 +471,7 @@ class ComposeWindow(Gtk.ApplicationWindow):
             self.files.remove(entry)
         child = btn.get_parent()
         self.att_box.remove(child)
+        self.att_box.set_visible(bool(self.files))
         self._size_info()
 
     def _size_info(self):
@@ -508,6 +629,12 @@ class ComposeWindow(Gtk.ApplicationWindow):
         ctrl = bool(state & Gdk.ModifierType.CONTROL_MASK)
         if ctrl and kv in (Gdk.KEY_Return, Gdk.KEY_KP_Enter):
             self.send()
+            return True
+        if ctrl and state & Gdk.ModifierType.SHIFT_MASK and kv in (Gdk.KEY_T, Gdk.KEY_t):
+            self._toggle_trx(not self.translator.is_open())
+            return True
+        if self.translator.is_open() and kv == Gdk.KEY_Escape:
+            self.translator.toggle(False)
             return True
         if self.fmt.key(kv, state):
             return True

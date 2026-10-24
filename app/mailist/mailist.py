@@ -180,7 +180,14 @@ button.ml-tabx:hover { background-color: @tertiary; color: @background; }
 window.ml-compose textview.ml-edit, window.ml-compose textview.ml-edit text { background: none; color: @foreground; }
 window.ml-compose textview.ml-edit { font-weight: normal; font-size: 13px; }
 window.ml-compose .ml-field { color: @secondary; min-width: 58px; }
+/* Kopfzeile wie notist: Glas-Schalter so flach wie die übrigen Knöpfe */
+.topbar button.glass-toggle { background: none; background-image: none; box-shadow: none; min-height: 0; min-width: 0;
+    border: 1px solid alpha(@primary, 0.55); border-radius: 4px; padding: 1px 8px; color: @foreground; font-size: 13px; }
+.topbar button.glass-toggle:checked { background-color: alpha(@primary, 0.22); color: @foreground; }
+.topbar button.glass-toggle:hover { background-color: @primary; color: @on_primary; border-color: @primary; }
 .ml-attrow { padding: 2px 0; }
+.ml-attrow flowboxchild { padding: 0; min-height: 0; }
+window.ml-compose .ml-dropping { box-shadow: inset 0 0 0 2px @primary; }
 window.ml-dialog { background-color: @background; }
 window.ml-dialog.glass { background-color: alpha(@background, 0.75); }
 .ml-fmtbar { padding: 4px 0 2px 0; border-top: 1px solid alpha(@primary, 0.18); margin-top: 2px; }
@@ -332,7 +339,8 @@ class Mailist(Gtk.Application):
     def do_startup(self):
         Gtk.Application.do_startup(self)
         import tui, swipe
-        tui.CSS = tui.CSS + ML_CSS + swipe.CSS
+        import translate
+        tui.CSS = tui.CSS + ML_CSS + swipe.CSS + translate.CSS
         tui.Theme.get()
         self.apply_security()
         self.load_accounts()
@@ -499,7 +507,12 @@ class Mailist(Gtk.Application):
                 w.say(f"abgleich: {data}", error=True)
         elif kind == "sent":
             if w:
-                w.say(f"gesendet: {data or '(ohne betreff)'}")
+                w.say(f"✓ gesendet: {data or '(ohne betreff)'}")
+            if not (w and w.is_active()):
+                n = Gio.Notification.new("✓ Mail gesendet")
+                n.set_body(data or "(ohne betreff)")
+                n.set_icon(Gio.ThemedIcon.new("mailist"))
+                self.send_notification("mailist-sent", n)
         elif kind == "more":
             if w:
                 w.more_done(*data)

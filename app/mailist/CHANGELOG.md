@@ -1,5 +1,20 @@
 # mailist
 
+## 1.5.0 (2026-10-24)
+- **Hover-Übersetzer von linguist**: Ist er in linguist eingeschaltet, zeigt der Knopf „übersetzer ◢“ im Schreibfenster,
+  ob er an ist (Klick = an/aus, Rechtsklick = linguist-Einstellungen, Strg+Umschalt+T = Karte mit markiertem Text).
+  Ohne linguist (oder mit Hover aus, Standard) bleibt alles wie bisher.
+
+## 1.4.0 (2026-10-24)
+- **Tab im Betreff** springt direkt ins Schreibfeld.
+- **Bestätigung nach dem Senden**: „✓ gesendet“ in der Statusleiste und – wenn das Fenster nicht vorn ist – als
+  Benachrichtigung.
+- **Einstellungen** auch als Zahnrad oben rechts.
+- **Dateien ins Schreibfenster ziehen** (z. B. aus filist) hängt sie als Anhang an.
+- **Rechtschreibprüfung** (Deutsch + Englisch, Rechtsklick auf rote Wörter) und **Übersetzer** aus notist im
+  Schreibfenster (`Strg+Umschalt+T`, markierter Text wird übernommen).
+- Die Anhangsleiste ist nur noch da, wenn es Anhänge gibt, und so schmal wie nötig.
+
 ## 1.3.0 (2026-10-22)
 - **Klick öffnet die Mail**: Ein Klick auf eine Mail öffnet sie groß – die Ordner links bleiben, Liste und
   Vorschau machen Platz. Zurück mit `Esc`, dem Zurück-Knopf, der Maustaste „zurück“ oder 2-Finger-Wischen. Mit den

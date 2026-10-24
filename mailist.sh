@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+[ "${1:-}" = --quit ] || { [ -x "$HOME/.local/bin/linguist" ] && "$HOME/.local/bin/linguist" --daemon >/dev/null 2>&1 & }   # linguist (Übersetzer) läuft immer mit
 # Starter für mailist. Läuft mailist schon (auch unsichtbar im Hintergrund), geht der Aufruf direkt per D-Bus
 # hin – ohne Python-/GTK-Start, das Fenster ist sofort da. Sonst wird mailist gestartet.
 #   mailist  ·  mailist --toggle (Super+G)  ·  mailist mailto:…  ·  mailist --daemon  ·  mailist --quit
