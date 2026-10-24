@@ -1,70 +1,73 @@
 # mailist
 
-Schlankes Mail-Programm (Gmail und IMAP/SMTP) im Terminal-Look der Suite (GTK4), aufgebaut wie ein Datei-Explorer:
-links Ordner und Labels, in der Mitte die Mail-Liste mit Spalten, rechts die Vorschau, oben Tabs.
-Mails liegen in einem lokalen Zwischenspeicher – das Fenster ist sofort da und auch offline lesbar.
+slim mail program (gmail and imap/smtp) in the terminal look of the suite (gtk4), built like a file explorer:
+folders and labels on the left, the mail list with columns in the middle, the preview on the right, tabs on top.
+mails are kept in a local cache – the window is there instantly and readable offline.
 
-## Installieren – Linux
+## install – linux
+
+the repository is public – no account needed:
 
 ```bash
-gh auth login                                   # einmalig (Repo ist privat, Einladung nötig)
-gh repo clone invincible-nix/mailist ~/mailist-src
-cd ~/mailist-src && ./install.sh
-```
-```bash
-git clone https://github.com/invincible-nix/mailist-public ~/mailist-src
+git clone https://github.com/danger-inc/mailist-public ~/mailist-src
 cd ~/mailist-src && ./install.sh
 ```
 
-Der Installer fragt nach den Systempaketen (GTK4, PyGObject – einmal Passwort), kopiert mailist nach
-`~/.local/share/mailist` und legt den Befehl `mailist` und einen Menüeintrag an. Symbole bringt mailist selbst mit.
+the installer asks for the system packages (gtk4, pygobject – password once), copies mailist to
+`~/.local/share/mailist` and creates the command `mailist` and a menu entry. the icons are bundled.
 
-## Mehrere Postfächer
+## update
 
-Unter **konten** lassen sich beliebig viele Postfächer hinzufügen: weitere Gmail-Konten und jedes Postfach mit
-IMAP/SMTP (GMX, web.de, Outlook, Posteo, mailbox.org, iCloud werden an der Adresse erkannt, alles andere per
-Server-Angaben). Gewechselt wird oben in der Ordnerleiste oder mit `Strg+Shift+A`; alle Postfächer gleichen im
-Hintergrund ab. Passwörter liegen im System-Schlüsselbund (abschaltbar), nie im Klartext.
+```bash
+cd ~/mailist-src && ./update.sh
+```
 
-## Verschlüsselung (OpenPGP)
+## several mailboxes
 
-Über das installierte `gpg`: im Schreibfenster **signieren** und **verschlüsseln** (schaltet sich von selbst ein,
-wenn für alle Empfänger ein Schlüssel da ist), beim Lesen werden Signaturen geprüft und verschlüsselte Mails
-entschlüsselt. Eigenen Schlüssel erzeugen/exportieren/importieren unter **einstellungen**. Alle
-sicherheitsrelevanten Schalter (Verbindungen, Zertifikate, Schlüsselbund, OpenPGP, Autocrypt, Rückfragen bei
-Links/Anhängen) stehen ebenfalls dort.
+under **konten** you can add as many mailboxes as you like: more gmail accounts and any mailbox with
+imap/smtp (gmx, web.de, outlook, posteo, mailbox.org, icloud are detected from the address, everything else
+via server settings). switch in the folder bar at the top or with `ctrl+shift+a`; all of them sync in the
+background. passwords go into the system keyring (can be turned off), never into plain text.
 
-## Mit Gmail verbinden (einmalig)
+## encryption (openpgp)
 
-mailist spricht direkt mit der Gmail-API – über **deinen eigenen** Google-Zugang, kein fremder Server dazwischen.
+via the installed `gpg`: **sign** and **encrypt** in the compose window (encrypt switches on by itself
+when there is a key for every recipient); when reading, signatures are checked and encrypted mails are
+decrypted. create/export/import your own key under **einstellungen**. all
+security-related switches (connections, certificates, keyring, openpgp, autocrypt, confirmations for
+links/attachments) are in there as well.
 
-1. [Google Cloud Console](https://console.cloud.google.com) → Projekt anlegen → **Google Auth Platform** →
-   Client erstellen, Typ **Desktop-App** → JSON herunterladen. Unter „Zielgruppe“ dich als Testnutzer eintragen.
-   (Wer datist schon eingerichtet hat: mailist nimmt denselben Zugang automatisch.)
-2. Im selben Projekt die **Gmail API** aktivieren (mailist hat dafür einen Knopf).
-3. In mailist links auf **konto** → „mit google anmelden“. Google warnt, die App sei nicht überprüft – es ist dein
-   eigener Zugang: „Weiter“ und den Haken bei Gmail setzen.
+## connect gmail (once)
 
-Im Testmodus beendet Google die Anmeldung nach 7 Tagen; mailist zeigt dann oben „⚠ neu anmelden“.
+mailist talks to the gmail api directly – through **your own** google access, no third-party server in between.
 
-## Bedienung
+1. [google cloud console](https://console.cloud.google.com) → create a project → **google auth platform** →
+   create a client, type **desktop app** → download the json. Under "audience" add yourself as a test user.
+   (if you already set up datist: mailist picks up the same access automatically.)
+2. enable the **gmail api** in the same project (mailist has a button for that).
+3. in mailist click **konto** on the left → "mit google anmelden". google warns that the app is not verified –
+   it is your own access: "continue" and tick the gmail box.
 
-- **Löschen:** Entf (Papierkorb), Shift+Entf (endgültig), Papierkorb-Knopf an jeder Zeile, Strg+Z macht es
-  rückgängig. Mehrere auswählen (Strg/Shift-Klick, Strg+A) → große Knöpfe für alle.
-- **aufräumen** (links): wer schickt am meisten? Alle Mails eines Absenders mit einem Klick weg, Newsletter abbestellen.
-- **Suche:** tippen filtert sofort lokal, Enter sucht im ganzen Postfach (bei Gmail auch `from:` `has:attachment` …).
-- Tasten: r antworten · a allen · f weiterleiten · e archivieren · s Stern · u gelesen/ungelesen · j/k nächste/vorige ·
-  Strg+N neu · Strg+T Tab · F9 Ordnerleiste · F3 Vorschau · F5 abgleichen. Zwei Finger wischen = zurück/vor.
-- Mails auf einen Ordner links ziehen = verschieben (Papierkorb, Spam, Label).
-- **Sicherheit:** Jede Mail wird lokal geprüft – SPF/DKIM/DMARC, gefälschte Absendernamen, andere Antwortadresse,
-  getarnte Links (rot; das echte Ziel steht beim Drüberfahren unten), gefährliche Anhänge. Externe Bilder und
-  Tracking-Pixel werden nie geladen.
+in testing mode google ends the login after 7 days; mailist then shows "⚠ neu anmelden" at the top.
 
-`mailist --daemon` hält mailist im Hintergrund bereit (gleicht ab, meldet neue Mails), `mailist --toggle` zeigt/versteckt
-das Fenster (gut für ein Tastenkürzel), `mailist mailto:…` schreibt eine neue Mail.
+## usage
 
-## Daten
+* **delete:** del (trash), shift+del (permanently), trash button on every row, ctrl+z undoes it.
+select several (ctrl/shift-click, ctrl+a) → big buttons for all of them.
+* **aufräumen** (left): who sends the most? remove all mails of a sender in one click, unsubscribe from newsletters.
+* **search:** typing filters locally right away, enter searches the whole mailbox (on gmail also `from:` `has:attachment` …).
+* keys: r reply · a reply all · f forward · e archive · s star · u read/unread · j/k next/previous ·
+ctrl+n new · ctrl+t tab · F9 folder bar · F3 preview · F5 sync. two-finger swipe = back/forward.
+* drag mails onto a folder on the left = move (trash, spam, label).
+* **security:** every mail is checked locally – spf/dkim/dmarc, forged sender names, different reply address,
+disguised links (red; the real target is shown at the bottom when you hover), dangerous attachments. external
+images and tracking pixels are never loaded.
 
-- Zwischenspeicher: `~/.cache/mailist/mail.db` (nur eine Kopie – Gmail hat alles; löschen schadet nicht)
-- Einstellungen und Anmeldung: `~/.config/mailist` (Token nur für dich lesbar)
-- Entfernen: `./uninstall.sh` – in Gmail selbst ändert sich nichts.
+`mailist --daemon` keeps mailist ready in the background (syncs, notifies about new mails), `mailist --toggle` shows/hides
+the window (good for a keybinding), `mailist mailto:…` writes a new mail.
+
+## data
+
+* cache: `~/.cache/mailist/mail.db` (just a copy – gmail has everything; deleting it does no harm)
+* settings and login: `~/.config/mailist` (token readable only by you)
+* removal: `./uninstall.sh` – nothing changes in gmail itself.
