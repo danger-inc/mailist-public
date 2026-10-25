@@ -259,15 +259,20 @@ class MailWindow(Gtk.ApplicationWindow):
             import changelog
 
             def has_update(latest):
-                b.add_css_class("news")
-                b.remove_css_class("off")
-                b.set_label(f"󰚰 v{version} → v{latest}")
-                b.set_tooltip_text(changelog.update_text(latest) + " · klick: changelog")
                 GLib.timeout_add(1200, lambda: (self.say(changelog.update_text(latest), seconds=12), False)[1])
             getattr(changelog, "check_update", lambda *a: None)("mailist", version, has_update)
         except Exception as e:
             print("update-check:", e)
-        return b
+        box = Gtk.Box(spacing=4, valign=Gtk.Align.CENTER)
+        box.append(b)
+        try:                      # 󰚰 update neben der Version (lädt + installiert)
+            import changelog
+            upd = changelog.update_button("mailist", version, notify=self.say, classes=("flat", "news"))
+            upd.set_margin_start(2)
+            box.append(upd)
+        except Exception as e:
+            print("update-button:", e)
+        return box
 
     @staticmethod
     def app_version():

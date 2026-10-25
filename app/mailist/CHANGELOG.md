@@ -1,5 +1,13 @@
 # mailist
 
+## 1.5.1 (2026-10-25)
+- **Update-Knopf**: Neben der Versionsnummer steht „󰑐“ – Klick sucht sofort nach einem Update. Gibt es eine neuere
+  Version, wird daraus „󰚰 update“; ein Klick lädt und installiert sie (Linux und Windows), danach heißt er „󰑓 neu starten“.
+- **Rückmeldung bei Umschalt-Knöpfen**: „An“ (z. B. „Ton behalten“) ist jetzt auch unter dem Mauszeiger zu sehen,
+  Drücken färbt sofort – man muss die Maus nicht mehr wegbewegen, um zu sehen, ob der Klick angekommen ist.
+- **Windows: echte Titelleiste** – das Fenster lässt sich verschieben, in der Größe ändern, minimieren und
+  maximieren.
+
 ## 1.5.0 (2026-10-24)
 - **Hover-Übersetzer von linguist**: Ist er in linguist eingeschaltet, zeigt der Knopf „übersetzer ◢“ im Schreibfenster,
   ob er an ist (Klick = an/aus, Rechtsklick = linguist-Einstellungen, Strg+Umschalt+T = Karte mit markiertem Text).
