@@ -232,6 +232,7 @@ class Mailist(Gtk.Application):
         self.prefs = load_prefs()
         self.win = None
         self.daemon = False
+        self._started = False
         self.intent = None           # ("compose", mailto) | ("toggle",) beim ersten Start
         self._held = False
         self.accounts = {}           # id → accounts.Account
@@ -373,6 +374,10 @@ class Mailist(Gtk.Application):
             GLib.timeout_add_seconds(3, lambda: (self.sync_now(quiet=True), False)[1])
 
     def do_activate(self):
+        if self.daemon and not self._started:      # app.run() aktiviert beim Start selbst → nicht zeigen
+            self._started = True
+            return
+        self._started = True
         self.show()
 
     def do_open(self, files, n, hint):
