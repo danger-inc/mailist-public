@@ -816,6 +816,8 @@ class Settings(Gtk.Box):
         w = self.win
         app = w.app
         tui.clear(self.inner)
+        self.section("design")
+        self.inner.append(tui.istheme.picker())
         self.section("allgemein")
         self.check("sidebar", "ordner-leiste zeigen (f9)", True, cb=lambda v: w.side_panel.set_visible(v))
         self.check("preview", "vorschau neben der liste (f3)", True, cb=lambda v: w.set_reading(False) if w.reading else w.apply_layout())
