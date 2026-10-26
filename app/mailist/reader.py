@@ -143,9 +143,10 @@ class Reader(Gtk.Box):
         box.append(self.subject)
         self.avatar = tui.label("", "ml-avatar", xalign=0.5)
         self.avatar.set_valign(Gtk.Align.START)
-        self.from_lbl = tui.label("", ellipsize=True, markup=True)
-        self.from_lbl.set_selectable(True)
-        self.to_lbl = tui.label("", "ml-meta", ellipsize=True)
+        self.from_lbl = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, max_children_per_line=30, row_spacing=0,
+                                    column_spacing=2, homogeneous=False)
+        self.to_lbl = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, max_children_per_line=30, row_spacing=0,
+                                  column_spacing=2, homogeneous=False)
         self.date_lbl = tui.label("", "ml-meta")
         self.date_lbl.set_valign(Gtk.Align.START)
         head = tui.hbox(self.avatar, tui.vbox(self.from_lbl, self.to_lbl, spacing=1, hexpand=True), self.date_lbl,
@@ -214,6 +215,16 @@ class Reader(Gtk.Box):
         click = Gtk.GestureClick(button=1)
         click.connect("released", self._text_click)
         self.text.add_controller(click)
+        rclick = Gtk.GestureClick(button=3)
+        rclick.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)   # vor GTKs eigenem (grauem) Menü
+        rclick.connect("pressed", self.text_menu)
+        self.text.add_controller(rclick)
+        sclick = Gtk.GestureClick(button=3)
+        sclick.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+        sclick.connect("pressed", lambda g, n, x, y: (
+            g.set_state(Gtk.EventSequenceState.CLAIMED),
+            self._label_menu(self.subject, x, y)))
+        self.subject.add_controller(sclick)
         motion = Gtk.EventControllerMotion()
         motion.connect("motion", self._text_motion)
         motion.connect("leave", lambda *_: self._set_hover(None))
@@ -236,7 +247,8 @@ class Reader(Gtk.Box):
         self.att_box = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, max_children_per_line=6, row_spacing=4,
                                    column_spacing=4, homogeneous=False)
         box.append(self.att_box)
-        self.scroll = Gtk.ScrolledWindow(child=box, hscrollbar_policy=Gtk.PolicyType.NEVER, vexpand=True)
+        vp = Gtk.Viewport(child=box, scroll_to_focus=False)     # sonst springt die Vorschau, sobald der Text den Fokus bekommt
+        self.scroll = Gtk.ScrolledWindow(child=vp, hscrollbar_policy=Gtk.PolicyType.NEVER, vexpand=True)
         return self.scroll
 
     def _make_tags(self):
@@ -541,20 +553,29 @@ class Reader(Gtk.Box):
         me = self.st.me
         name, addr = r["from_name"], r["from_addr"]
         if addr and addr == me:
-            self.from_lbl.set_markup("<b>ich</b>")
+            self._chips(self.from_lbl, [("", "ich", None)], bold=True)
             self.avatar.set_label("\U000F0004")
         else:
-            self.from_lbl.set_markup(f"<b>{tui.esc(name or addr or '?')}</b>"
-                                     + (f"  <span alpha='60%'>{tui.esc(addr)}</span>" if name and addr else ""))
+            self._chips(self.from_lbl, [("", name or addr or "?", addr or None)], bold=True)
             self.avatar.set_label((name or addr or "?")[:1].upper())
-        to = [("ich" if a == me else (n or a)) for n, a in stmod.addr_list(r["to_addr"])]
+        to = [("ich" if a == me else (n or a), None if a == me else a) for n, a in stmod.addr_list(r["to_addr"])]
         try:
-            cc = [("ich" if a == me else (n or a)) for n, a in
+            cc = [("ich" if a == me else (n or a), None if a == me else a) for n, a in
                   stmod.addr_list(json.loads(r["hdr"] or "{}").get("cc", ""))]
         except ValueError:
             cc = []
-        self.to_lbl.set_label((("an " + ", ".join(to[:6]) + (f" +{len(to) - 6}" if len(to) > 6 else "")) if to
-                               else "") + (("  ·  cc " + ", ".join(cc[:4])) if cc else ""))
+        ents = []
+        if to:
+            ents.append(("an ", None, None))
+            for k, (n, a) in enumerate(to[:6]):
+                ents.append(("" if not k else ", ", n, a))
+            if len(to) > 6:
+                ents.append((f" +{len(to) - 6}", None, None))
+        if cc:
+            ents.append(("  ·  cc " if to else "cc ", None, None))
+            for k, (n, a) in enumerate(cc[:4]):
+                ents.append(("" if not k else ", ", n, a))
+        self._chips(self.to_lbl, ents, meta=True)
         self.to_lbl.set_visible(bool(to or cc))
         from window import long_date
         self.date_lbl.set_label(long_date(r["date"]))
@@ -565,6 +586,85 @@ class Reader(Gtk.Box):
         self.update_title()
         for n in self.tool_names:
             n.set_visible(self.get_width() > 520 or self.get_width() == 0)
+
+    def _chips(self, box, ents, bold=False, meta=False):
+        """Kopfzeile: Adressen als Knöpfe – Klick kopiert, Rechtsklick öffnet das Menü. ents: (davor, text, adresse)."""
+        while (c := box.get_first_child()):
+            box.remove(c)
+        for pre, text, addr in ents:
+            if text is None:                              # reiner Zwischentext
+                box.append(tui.label(pre, "ml-meta"))
+                continue
+            if pre:
+                box.append(tui.label(pre, "ml-meta"))
+            if not addr:
+                box.append(tui.label(f"<b>{tui.esc(text)}</b>", markup=True) if bold else tui.label(text, "ml-meta"))
+                continue
+            b = Gtk.Button(focus_on_click=False, tooltip_text=f"{addr} – klicken zum Kopieren, Rechtsklick für mehr")
+            b.add_css_class("ml-link")
+            lab = tui.label(f"<b>{tui.esc(text)}</b>" if bold else tui.esc(text), markup=True, ellipsize=True)
+            if meta:
+                lab.add_css_class("ml-meta")
+            if bold and text != addr:
+                lab = tui.hbox(lab, tui.label(f"<span alpha='60%'>{tui.esc(addr)}</span>", markup=True, ellipsize=True),
+                                spacing=6)
+            b.set_child(lab)
+            b.connect("clicked", lambda _b, a=addr: self.copy_text(a, "adresse kopiert: " + a))
+            rc = Gtk.GestureClick(button=3)
+            rc.connect("pressed", lambda g, n, x, y, b=b, a=addr, t=text: (
+                g.set_state(Gtk.EventSequenceState.CLAIMED), self.addr_menu(b, a, t, x, y)))
+            b.add_controller(rc)
+            box.append(b)
+
+    def copy_text(self, text, msg="kopiert"):
+        self.get_clipboard().set(text)
+        self.win.say(msg, seconds=3)
+
+    def addr_menu(self, widget, addr, name, x, y):
+        import pages
+        m = pages.Menu(widget, x, y)
+        m.item("adresse kopieren", lambda: self.copy_text(addr, "adresse kopiert: " + addr))
+        if name and name != addr:
+            m.item("name kopieren", lambda: self.copy_text(name, "name kopiert"))
+        m.item("neue mail an …", lambda: self.win.app.compose("mailto:" + addr))
+        m.sep()
+        m.item("alle von dieser adresse zeigen", lambda: self.win.go(("sender", addr, name or addr)))
+        m.popup()
+
+    def _label_menu(self, lab, x, y):
+        import pages
+        m = pages.Menu(lab, x, y)
+        ok, a, b = lab.get_selection_bounds()
+        if ok:
+            m.item("kopieren", lambda: self.copy_text(lab.get_text()[a:b], "kopiert"))
+        m.item("ganzen betreff kopieren", lambda: self.copy_text(lab.get_text(), "betreff kopiert"))
+        m.popup()
+
+    def text_menu(self, g, n, x, y):
+        import pages
+        g.set_state(Gtk.EventSequenceState.CLAIMED)
+        href = self._href_at(self._offset_at(x, y))
+        m = pages.Menu(self.text, x, y)
+        if href:
+            m.item("link öffnen", lambda: self.open_link(href))
+            m.item("link kopieren", lambda: self.copy_text(href.removeprefix("mailto:"), "link kopiert"))
+            m.sep()
+        if self.buf.get_has_selection():
+            m.item("kopieren", lambda: self.text.emit("copy-clipboard"))
+        m.item("alles auswählen", lambda: self.text.emit("select-all", True))
+        m.item("ganzen text kopieren", lambda: self.copy_text(
+            self.buf.get_text(self.buf.get_start_iter(), self.buf.get_end_iter(), False), "text kopiert"))
+        if self.buf.get_has_selection():
+            def sel():
+                a, b = self.buf.get_selection_bounds()
+                return self.buf.get_text(a, b, False).strip()
+            m.sep()
+            m.item("auswahl in allen mails suchen", lambda: (self.win.search.set_text(sel()),
+                                                             self.win.search.emit("activate")))
+            m.item("auswahl im web suchen", lambda: Gtk.UriLauncher(
+                uri="https://duckduckgo.com/?q=" + __import__("urllib.parse").parse.quote(sel())).launch(
+                self.win, None, None))
+        m.popup()
 
     def refresh_row(self):
         if not self.mid:
@@ -740,7 +840,7 @@ class Reader(Gtk.Box):
             self.win.say(("⚠ " + warn + " · " if warn else "\U000F0337 ") + href[:240], seconds=4)
 
     def _text_click(self, g, n, x, y):
-        if self.buf.get_has_selection():
+        if n > 1 or self.buf.get_has_selection():
             return
         href = self._href_at(self._offset_at(x, y))
         if href:

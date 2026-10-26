@@ -1099,6 +1099,8 @@ class MailWindow(Gtk.ApplicationWindow):
         return False
 
     def _list_event(self, _c, ev):
+        if ev is None or self.reading or not (self.compact or not self.prefs.get("preview", True)):
+            return False                                        # Vorschau sichtbar: Einfachklick wählt nur aus
         t = ev.get_event_type()
         if t == Gdk.EventType.BUTTON_PRESS and ev.get_button() == 1:
             ok, x, y = ev.get_position()
@@ -1431,7 +1433,19 @@ class MailWindow(Gtk.ApplicationWindow):
         pop.item("markierung entfernen" if starred else "markieren (stern)", lambda: self.star(ids, not starred))
         if one:
             pop.item("weiterleiten (f)", lambda: self.reader.reply("forward"))
+            pop.item("in neuem tab öffnen", lambda: (self.new_tab(self.cur.loc), None)[1])
         pop.sep()
+        if one and r:
+            def _cp(text, msg):
+                self.get_clipboard().set(text)
+                self.say(msg, seconds=3)
+            if r["from_addr"]:
+                pop.item("absenderadresse kopieren", lambda: _cp(r["from_addr"], "adresse kopiert"))
+            pop.item("betreff kopieren", lambda: _cp(r["subject"] or "", "betreff kopiert"))
+            pop.item("als .eml speichern", lambda: self.reader.save_eml())
+            pop.item("quelltext / kopfzeilen", lambda: self.reader.show_source())
+            pop.item("im browser öffnen (ohne externe inhalte)", lambda: self.reader.open_browser())
+            pop.sep()
         if in_trash:
             pop.item("wiederherstellen", lambda: self.restore(ids))
         elif in_spam:

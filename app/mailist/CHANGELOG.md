@@ -1,5 +1,14 @@
 # mailist
 
+## 1.6.2 (2026-10-26)
+- **Vorschau springt nicht mehr beim Doppelklick im Fließtext**: Der Textbereich scrollte beim Fokuswechsel von selbst an eine andere Stelle – abgeschaltet.
+- **Vorschau beruhigt**: Ist die Vorschau neben der Liste sichtbar, wählt ein Klick auf eine Mail nur aus – die Ansicht springt nicht mehr in die große Leseansicht. Doppelklick auf eine Mail öffnet sie groß; im Text markiert Doppelklick ein Wort. Ein Absturz bei Klicks in der Liste ist behoben.
+- **Mehr im Rechtsklick**: Mailliste (neuer Tab, Adresse/Betreff kopieren, .eml speichern, Quelltext, im Browser öffnen) und Mailtext (ganzen Text kopieren, Auswahl suchen, Auswahl im Web suchen).
+
+## 1.6.1 (2026-10-26)
+- **Adressen im Mailkopf zum Kopieren**: Absender, „an“ und „cc“ sind jetzt Knöpfe – ein Klick kopiert die Adresse.
+- **Rechtsklick im Suite-Stil**: Auf einer Adresse (kopieren, neue Mail, alle von ihr zeigen) und im Mailtext (Link öffnen/kopieren, kopieren, alles auswählen) erscheint das mailist-Menü statt des grauen GTK-Menüs.
+
 ## 1.6.0 (2026-10-26)
 - **Design wählbar**: In den Einstellungen gibt es die Designauswahl wie in notist (Automatisch + 9 Designs). Die Wahl gilt für alle -ist-Apps zugleich und wirkt sofort. Bei „Automatisch“ (Desktop-Farben) kannst du zwischen **Dunkel** und **Hell** umschalten.
 

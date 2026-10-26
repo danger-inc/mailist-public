@@ -156,11 +156,12 @@ popover.ml-menu > contents { background-color: alpha(@background, 0.95); border:
     padding: 4px; box-shadow: 0 8px 22px rgba(0,0,0,0.3); }
 popover.ml-menu button.opt { background: none; border: none; box-shadow: none; padding: 3px 10px; border-radius: 4px;
     color: @foreground; min-height: 0; }
+popover.ml-menu button.opt > label { color: @foreground; }
 popover.ml-menu button.opt:hover { background-color: @primary; color: @on_primary; }
-window.ml popover.ml-menu button.opt:hover label, popover.ml-menu button.opt:hover label { color: @on_primary; }
-popover.ml-menu button.opt.danger label { color: @tertiary; }
+window.ml popover.ml-menu button.opt:hover > label, popover.ml-menu button.opt:hover > label { color: @on_primary; }
+popover.ml-menu button.opt.danger > label { color: @tertiary; }
 popover.ml-menu button.opt.danger:hover { background-color: @tertiary; }
-popover.ml-menu button.opt.danger:hover label { color: @background; }
+popover.ml-menu button.opt.danger:hover > label { color: @background; }
 popover.ml-menu separator { background-color: alpha(@primary, 0.25); margin: 3px 4px; min-height: 1px; }
 .ml-quick { padding: 2px 2px 4px 2px; }
 popover.ml-menu button.ml-qbtn { background: none; border: 1px solid alpha(@primary, 0.35); box-shadow: none;

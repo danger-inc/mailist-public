@@ -18,11 +18,58 @@ CONSOLE = "https://console.cloud.google.com"
 
 # ====================================================================== Bausteine
 
+_active_menu = None
+
+
+def close_on_outside(pop, owner):
+    """Menü ohne GTK-Grab: Klick irgendwo anders, Scrollen, Esc oder Fensterwechsel schließen es – der Klick bzw. das
+    Scrollen kommt trotzdem an (ein Grab-Popup hing sich bei einem zweiten Menü auf und fror die Eingabe ein)."""
+    root = owner.get_root()
+    if root is None:
+        return
+    t0 = GLib.get_monotonic_time()
+
+    def close(*_):
+        if GLib.get_monotonic_time() - t0 > 150_000:        # das Ereignis, das das Menü öffnete, ignorieren
+            pop.popdown()
+        return False
+    click = Gtk.GestureClick(button=0)
+    click.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+    click.connect("pressed", close)
+    scroll = Gtk.EventControllerScroll(flags=Gtk.EventControllerScrollFlags.BOTH_AXES)
+    scroll.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+    scroll.connect("scroll", close)
+    key = Gtk.EventControllerKey()
+    key.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+    key.connect("key-pressed", lambda c, kv, *_: (pop.popdown(), True)[1] if kv == 0xFF1B else False)
+    for c in (click, scroll, key):
+        root.add_controller(c)
+    hid = root.connect("notify::is-active", lambda w, p: None if w.is_active() else pop.popdown())
+
+    def done(*_):
+        root.disconnect(hid)
+
+        def drop():                                          # nie mitten im Ereignis entfernen (Absturz)
+            for c in (click, scroll, key):
+                root.remove_controller(c)
+            return False
+        GLib.idle_add(drop)
+    pop.connect("closed", done)
+
+
 class Menu:
     """Rechtsklick-/Mehr-Menü im Suite-Stil: große Knöpfe oben (quick), darunter Einträge."""
 
     def __init__(self, widget, x=None, y=None):
-        self.pop = Gtk.Popover(has_arrow=False)
+        global _active_menu
+        if _active_menu is not None:
+            try:
+                _active_menu.popdown()
+            except Exception:
+                pass
+        self.widget = widget
+        self.pop = Gtk.Popover(has_arrow=False, autohide=False)
+        _active_menu = self.pop
         self.pop.add_css_class("ml-menu")
         self.pop.set_parent(widget)
         if x is not None:
@@ -63,6 +110,7 @@ class Menu:
 
     def popup(self):
         self.pop.popup()
+        close_on_outside(self.pop, self.widget)
 
 
 class BigButton(Gtk.Button):
