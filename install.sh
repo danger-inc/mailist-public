@@ -33,7 +33,7 @@ mkdir -p "$DIR/logo" "$RICE/fonts" "$BIN" "$APPS" "$ICONS"
 cp -f "$SRC"/app/mailist/*.py "$SRC"/app/mailist/VERSION "$SRC"/app/mailist/CHANGELOG.md "$DIR/"
 install -m 755 "$SRC/mailist.sh" "$DIR/mailist.sh"
 cp -f "$SRC/mailist.svg" "$DIR/logo/mailist.svg"
-cp -f "$SRC/app/tui.py" "$SRC/app/glass.py" "$SRC/app/istheme.py" "$SRC/app/changelog.py" "$SRC/app/swipe.py" "$RICE/"   # gemeinsame Bausteine
+cp -f "$SRC/app/tui.py" "$SRC/app/glass.py" "$SRC/app/istheme.py" "$SRC/app/ist-swipe.py" "$SRC/app/changelog.py" "$SRC/app/swipe.py" "$RICE/"   # gemeinsame Bausteine
 cp -f "$SRC"/app/fonts/* "$RICE/fonts/"                           # Symbolschrift (Icons ohne Nerd Font)
 ln -sf "$DIR/mailist.sh" "$BIN/mailist"
 sed "s|@EXEC@|$BIN/mailist|g" "$SRC/mailist.desktop.in" > "$APPS/mailist.desktop"

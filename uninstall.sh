@@ -13,7 +13,7 @@ if [ -d "$HOME/.config/mailist" ]; then
 fi
 # gemeinsame Bausteine nur entfernen, wenn keine andere Suite-App sie noch braucht
 if [ ! -d "$RICE/calendar" ] && [ ! -d "$RICE/music" ] && [ ! -d "$HOME/.local/share/wallist" ] && [ ! -d "$HOME/.local/share/sharist" ] && [ ! -d "$HOME/.local/share/linguist" ]; then
-    rm -rf "$RICE/fonts" "$RICE/tui.py" "$RICE/glass.py" "$RICE/istheme.py" "$RICE/changelog.py" "$RICE/swipe.py" "$RICE/__pycache__"
+    rm -rf "$RICE/fonts" "$RICE/tui.py" "$RICE/glass.py" "$RICE/istheme.py" "$RICE/ist-swipe.py" "$RICE/changelog.py" "$RICE/swipe.py" "$RICE/__pycache__"
     rmdir "$RICE" 2>/dev/null || true
 fi
 echo "mailist entfernt. Deine Mails liegen weiter in Gmail."
