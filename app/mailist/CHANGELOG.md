@@ -1,5 +1,8 @@
 # mailist
 
+## 1.7.0 (2026-10-27)
+- **Wechsel-Animation**: Der Wechsel zwischen Hell und Dunkel (und zwischen Designs) läuft als Scanbalken über den ganzen Bildschirm. Alle Fenster, die Leiste und das Terminal wechseln darunter im selben Moment, hinter dem Balken steht das neue Design. An/aus und Dauer (Standard 1,5 s) stehen in der Designauswahl der Einstellungen.
+
 ## 1.6.2 (2026-10-26)
 - **Vorschau springt nicht mehr beim Doppelklick im Fließtext**: Der Textbereich scrollte beim Fokuswechsel von selbst an eine andere Stelle – abgeschaltet.
 - **Vorschau beruhigt**: Ist die Vorschau neben der Liste sichtbar, wählt ein Klick auf eine Mail nur aus – die Ansicht springt nicht mehr in die große Leseansicht. Doppelklick auf eine Mail öffnet sie groß; im Text markiert Doppelklick ein Wort. Ein Absturz bei Klicks in der Liste ist behoben.
