@@ -1,5 +1,10 @@
 # mailist
 
+## 1.8.0 (2026-10-28)
+- **Abgelaufene Anmeldung wird gemeldet**: Läuft der Google-Zugang ab (im Testmodus nach 7 Tagen), kommt eine Benachrichtigung „neu anmelden“ – ein Klick öffnet die Konto-Seite. Schon einen Tag vorher gibt es eine Vorwarnung. Deine Mails bleiben gespeichert.
+- **Entwürfe gehen nicht mehr verloren**: Das Schreibfenster sichert Empfänger, Betreff und Text alle 15 Sekunden lokal. Nach Absturz oder Neustart öffnet sich der Entwurf von selbst wieder. Beim Senden oder bewussten Verwerfen wird die Sicherung gelöscht.
+- Gemeinsame Module (Changelog-Fenster, Design) auf den neuesten Stand der Suite gebracht.
+
 ## 1.7.0 (2026-10-27)
 - **Wechsel-Animation**: Der Wechsel zwischen Hell und Dunkel (und zwischen Designs) läuft als Scanbalken über den ganzen Bildschirm. Alle Fenster, die Leiste und das Terminal wechseln darunter im selben Moment, hinter dem Balken steht das neue Design. An/aus und Dauer (Standard 1,5 s) stehen in der Designauswahl der Einstellungen.
 

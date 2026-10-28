@@ -1,6 +1,6 @@
 # Neue Mail / Antworten / Weiterleiten – eigenes kleines Fenster im Suite-Stil.
 # Senden geht über die Warteschlange: offline geschrieben = gesendet, sobald wieder Netz da ist.
-import base64, email.message, email.policy, email.utils, mimetypes, os, re, threading, urllib.parse
+import base64, json, time, email.message, email.policy, email.utils, mimetypes, os, re, threading, urllib.parse
 
 import gi
 gi.require_version("Gtk", "4.0")
@@ -16,6 +16,30 @@ import store as stmod
 import tui
 
 DRAFTS = os.path.join(stmod.CACHE, "entwurf.txt")
+AUTOSAVE = os.path.join(stmod.CACHE, "autosave")
+
+
+def leftover_drafts():
+    """Entwürfe, die beim letzten Mal nicht sauber geschlossen wurden (Absturz, Neustart)."""
+    out = []
+    try:
+        names = sorted(os.listdir(AUTOSAVE))
+    except OSError:
+        return out
+    for n in names:
+        p = os.path.join(AUTOSAVE, n)
+        try:
+            with open(p, encoding="utf-8") as f:
+                d = json.load(f)
+        except (OSError, ValueError):
+            d = None
+        if d is not None:
+            out.append(d)
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+    return out
 
 
 def parse_mailto(uri):
@@ -206,6 +230,8 @@ class ComposeWindow(Gtk.ApplicationWindow):
         drop.connect("leave", lambda *_: self.panel.remove_css_class("ml-dropping"))
         self.add_controller(drop)
         self.connect("close-request", self._closing)
+        self._auto_path = os.path.join(AUTOSAVE, f"{int(time.time() * 1000)}-{id(self) & 0xffff}.json")
+        self._auto_timer = GLib.timeout_add_seconds(15, self._autosave)
         for e in (self.to, self.cc, self.bcc):
             e.connect("changed", lambda *_: self._keys_later())
         self._prefill(mailto)
@@ -650,8 +676,59 @@ class ComposeWindow(Gtk.ApplicationWindow):
             text = text.split("\nAm ", 1)[0].split("---------- Weitergeleitete", 1)[0]
         return bool(text.strip()) or (bool(self.files) and self.mode not in ("forward", "draft"))
 
+    def _draft_state(self):
+        buf = self.body.get_buffer()
+        text = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), False)
+        return {"acct": self.acct.id, "to": self.to.get_text(), "cc": self.cc.get_text(),
+                "bcc": self.bcc.get_text(), "subject": self.subject.get_text(), "text": text}
+
+    def _autosave(self):
+        if self.sent:
+            return False
+        d = self._draft_state()
+        try:
+            if self.mode in ("new", "draft") and (d["text"].strip() or d["subject"].strip() or d["to"].strip()) \
+                    or self._has_text():
+                os.makedirs(AUTOSAVE, mode=0o700, exist_ok=True)
+                tmp = self._auto_path + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(d, f)
+                os.chmod(tmp, 0o600)
+                os.replace(tmp, self._auto_path)
+        except OSError:
+            pass
+        return True
+
+    def _autoclear(self):
+        if self._auto_timer:
+            GLib.source_remove(self._auto_timer)
+            self._auto_timer = 0
+        try:
+            os.remove(self._auto_path)
+        except OSError:
+            pass
+
+    def restore(self, d):
+        aid = d.get("acct")
+        for _ in range(len(self.app.accounts)):
+            if self.acct.id == aid or aid not in self.app.accounts:
+                break
+            self._next_account()
+        self.to.set_text(d.get("to", ""))
+        if d.get("cc"):
+            self.cc.set_text(d["cc"])
+            self.cc_row.set_visible(True)
+        if d.get("bcc"):
+            self.bcc.set_text(d["bcc"])
+            self.bcc_row.set_visible(True)
+        self.subject.set_text(d.get("subject", ""))
+        self.body.get_buffer().set_text(d.get("text", ""))
+        self.title_lbl.set_label("wiederhergestellt")
+        self.set_title("mailist · wiederhergestellter entwurf")
+
     def _closing(self, *_):
         if self.sent or not self._has_text() or getattr(self, "_really", False):
+            self._autoclear()
             if self.sugg.get_parent():
                 self.sugg.unparent()
             return False

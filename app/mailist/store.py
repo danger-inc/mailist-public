@@ -444,6 +444,10 @@ class GmailBackend:
         with self.bound():
             return gmail.expired()
 
+    def signed_in_at(self):
+        with self.bound():
+            return gmail.signed_in_at()
+
     def online(self):
         return gmail.online()
 

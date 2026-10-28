@@ -240,6 +240,7 @@ class Mailist(Gtk.Application):
         self.acct = None             # das gerade gezeigte Konto
         self._timer = None
         self.notified = set()
+        self.warned = set()
         self.state = "idle"          # idle | busy | offline | expired | noauth
 
     # ---------------- Einstellungen
@@ -352,7 +353,8 @@ class Mailist(Gtk.Application):
                                 ("sync", None, lambda *_: self.sync_now()),
                                 ("compose", "s", lambda a, p: self.compose(p.get_string())),
                                 ("open-mail", "s", lambda a, p: self.open_mail(p.get_string())),
-                                ("account", "s", lambda a, p: self.switch_account(p.get_string()))):
+                                ("account", "s", lambda a, p: self.switch_account(p.get_string())),
+                                ("reauth", "s", lambda a, p: self.reauth(p.get_string()))):
             act = Gio.SimpleAction.new(name, GLib.VariantType.new(ptype) if ptype else None)
             act.connect("activate", cb)
             self.add_action(act)
@@ -363,6 +365,7 @@ class Mailist(Gtk.Application):
         except Exception:
             pass
         GLib.timeout_add(1500 if self.daemon else 300, lambda: (self.sync_now(), False)[1])
+        GLib.timeout_add(2500, lambda: (self.restore_drafts(), False)[1])
 
     def _schedule(self):
         if self._timer:
@@ -424,6 +427,16 @@ class Mailist(Gtk.Application):
         self.build()
         compose.ComposeWindow(self, mailto=mailto or None).present()
 
+    def restore_drafts(self):
+        import compose
+        for d in compose.leftover_drafts():
+            self.build()
+            w = compose.ComposeWindow(self)
+            w.restore(d)
+            w.present()
+            if self.win:
+                self.win.say("entwurf wiederhergestellt – war beim letzten Schließen nicht gesendet")
+
     def open_mail(self, mid):
         aid, _, m = mid.rpartition("|")
         if aid and aid in self.accounts:
@@ -443,7 +456,9 @@ class Mailist(Gtk.Application):
             if b.expired():
                 if acc is self.acct:
                     self._set_state("expired")
+                self.notify_auth(acc)
                 continue
+            self.warn_expiry(acc)
             acc.syncer.request("sync")
 
     def _event(self, aid, kind, data):
@@ -465,6 +480,8 @@ class Mailist(Gtk.Application):
         # anderes Konto im Hintergrund: Zustand merken, neue Mails melden, Zähler links auffrischen
         if kind in ("offline", "expired", "auth"):
             acc.state = {"auth": "noauth"}.get(kind, kind)
+            if kind == "expired":
+                self.notify_auth(acc)
         elif kind in ("synced", "idle"):
             if acc.state in ("busy",):
                 acc.state = "idle"
@@ -496,6 +513,7 @@ class Mailist(Gtk.Application):
             self._set_state("offline", str(data))
         elif kind == "expired":
             self._set_state("expired")
+            self.notify_auth(self.acct)
         elif kind == "auth":
             self._set_state("noauth", data)
             if w:
@@ -525,6 +543,37 @@ class Mailist(Gtk.Application):
         elif kind == "search":
             if w:
                 w.search_done(*data)
+
+    def reauth(self, aid):
+        if aid in self.accounts:
+            self.switch_account(aid)
+        self.show()
+        self.win.go(("account",))
+
+    def notify_auth(self, acc, soon=False):
+        """Anmeldung abgelaufen (oder läuft bald ab): einmal pro Konto und Sitzung melden, Klick = Konto-Seite."""
+        key = (acc.id, "soon" if soon else "expired")
+        if key in self.warned:
+            return
+        self.warned.add(key)
+        if self.win and self.win.is_active() and acc is self.acct:
+            return
+        if soon:
+            n = Gio.Notification.new(f"{acc.label}: Anmeldung läuft bald ab")
+            n.set_body("Google beendet den Testmodus-Zugang nach 7 Tagen – einmal neu anmelden (Klick).")
+        else:
+            n = Gio.Notification.new(f"{acc.label}: neu anmelden")
+            n.set_body("Die Anmeldung ist abgelaufen, es kommen keine neuen Mails. Klick = Konto-Seite. "
+                       "Deine Mails bleiben gespeichert.")
+        n.set_default_action_and_target("app.reauth", GLib.Variant("s", acc.id))
+        n.set_icon(Gio.ThemedIcon.new("mailist"))
+        self.send_notification("mailist-auth-" + acc.id, n)
+
+    def warn_expiry(self, acc):
+        b = acc.backend
+        since = getattr(b, "signed_in_at", lambda: None)()
+        if since and getattr(acc, "kind", "gmail") == "gmail" and 7 - (time.time() - since) / 86400 < 1:
+            self.notify_auth(acc, soon=True)
 
     def notify_new(self, ids, acc=None):
         """Neue Mails melden (nicht, wenn das Fenster gerade vorn ist; nur Posteingang ohne Werbung)."""
