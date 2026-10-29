@@ -363,7 +363,7 @@ class Account(Gtk.Box):
                 state = "passwort fehlt"
             row = tui.hbox(tui.label(glyph, "accent"),
                            tui.label(a.label, "ml-acctname" + (" cur" if cur else "")),
-                           tui.label(mask(a.address) if a.address != a.label else "", "ml-meta", ellipsize=True,
+                           tui.label(a.address if a.address != a.label else "", "ml-meta",
                                      hexpand=True, ),
                            tui.label(state, "ml-meta" if ok else "ml-warn"), spacing=8)
             if not cur:
@@ -423,7 +423,7 @@ class Account(Gtk.Box):
         if ok:
             synced = st.get("synced")
             self.inner.append(tui.label(
-                f"\U000F0565  {mask(c.get('address'))} · {c.get('imap_host')} ({c.get('imap_tls', 'ssl')}) · "
+                f"\U000F0565  {c.get('address')} · {c.get('imap_host')} ({c.get('imap_tls', 'ssl')}) · "
                 f"senden über {c.get('smtp_host')}:{c.get('smtp_port')}", "ml-step", wrap=True))
             n = st.count_local("ALLMAIL") + st.count_local("TRASH") + st.count_local("SPAM")
             kr = "im schlüsselbund" if vault.in_keyring(acc.id) else "nur bis zum beenden (schlüsselbund aus)"
