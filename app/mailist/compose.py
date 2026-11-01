@@ -183,7 +183,13 @@ class ComposeWindow(Gtk.ApplicationWindow):
         top_sc = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.EXTERNAL, vscrollbar_policy=Gtk.PolicyType.NEVER,
                                     propagate_natural_height=True, child=top)
         self._narrow = None
-        self.add_tick_callback(self._fit_top)
+        # nur bei Größenänderung (ein Tick-Callback hielt den Frame-Takt dauernd auf 60 Hz)
+        def on_realize(w):
+            w.get_surface().connect("layout", lambda _s, width, _h: self._fit_top(width))
+            self._fit_top(w.get_width())
+        self.connect("realize", on_realize)
+        if self.get_realized():
+            on_realize(self)
         content = tui.vbox(Gtk.WindowHandle(child=top_sc), panel, status, spacing=0)
         panel.set_margin_start(14)
         panel.set_margin_end(14)
@@ -301,14 +307,13 @@ class ComposeWindow(Gtk.ApplicationWindow):
             self.title_lbl.set_label("entwurf")
         self.set_title(f"mailist · {self.title_lbl.get_label()}")
 
-    def _fit_top(self, *_):
-        narrow = self.get_width() < 560
+    def _fit_top(self, width):
+        narrow = width < 560
         if narrow != self._narrow:
             self._narrow = narrow
             self.brand.set_visible(not narrow)
             self.title_lbl.set_visible(not narrow)
             self.from_btn.set_visible(not narrow and len(self.app.accounts) > 1 and self.mode == "new")
-        return True
 
     # ---------------- Betreff → Text, Rechtschreibung, Übersetzer
     def _subject_key(self, _c, kv, _code, state):

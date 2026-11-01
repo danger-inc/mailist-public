@@ -1,5 +1,8 @@
 # mailist
 
+## 1.9.0 (2026-11-01)
+- **Scroll-Ende**: Wer am Ende einer Seite weiterscrollt, sieht aus der Kante einen Verlauf aus ░ ▒ ▓ █ aufsteigen, am Mauszeiger am höchsten. Die Liste bewegt sich dabei nicht und der Effekt läuft ohne Überschwingen aus. Er erscheint nur, wenn kein umgebendes Scroll-Fenster mehr weiterscrollen kann. Abschalten: `"scroll_end": false` in ~/.config/rice-apps/settings.json oder Energiesparmodus.
+
 ## 1.8.0 (2026-10-28)
 - **Abgelaufene Anmeldung wird gemeldet**: Läuft der Google-Zugang ab (im Testmodus nach 7 Tagen), kommt eine Benachrichtigung „neu anmelden“ – ein Klick öffnet die Konto-Seite. Schon einen Tag vorher gibt es eine Vorwarnung. Deine Mails bleiben gespeichert.
 - **Entwürfe gehen nicht mehr verloren**: Das Schreibfenster sichert Empfänger, Betreff und Text alle 15 Sekunden lokal. Nach Absturz oder Neustart öffnet sich der Entwurf von selbst wieder. Beim Senden oder bewussten Verwerfen wird die Sicherung gelöscht.
