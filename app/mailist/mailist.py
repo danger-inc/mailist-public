@@ -112,10 +112,17 @@ window.ml .ml-guard .ml-gl { color: @primary; }
 window.ml .ml-guard.mittel .ml-gl, window.ml .ml-guard.hoch .ml-gl { color: @tertiary; }
 window.ml .ml-reason { font-size: 12px; font-weight: normal; color: alpha(@foreground, 0.85); }
 window.ml .ml-reason.hoch { color: @tertiary; font-weight: bold; }
-.ml-osint { border-radius: 6px; padding: 3px 6px; border: 1px dashed alpha(@primary, 0.4); }
-window.ml .ml-osint-title { color: @secondary; font-size: 11px; }
-button.ml-chip { background: none; box-shadow: none; border: 1px solid alpha(@primary, 0.4); border-radius: 4px;
-    padding: 1px 8px; min-height: 0; color: @foreground; }
+.ml-osint { border-radius: 8px; padding: 6px 8px; background-color: alpha(@primary, 0.07);
+    border: 1px solid alpha(@primary, 0.22); }
+window.ml .ml-osint-title { color: @primary; font-size: 12px; font-weight: bold; }
+button.ml-obrand { background: none; border: none; box-shadow: none; padding: 2px 4px; min-height: 0; border-radius: 6px; }
+button.ml-obrand:hover { background-color: alpha(@primary, 0.16); }
+.ml-ogrp { border-radius: 7px; padding: 2px 4px; background-color: alpha(@foreground, 0.06); }
+window.ml .ml-ocap { font-size: 10px; color: @secondary; margin: 0 4px 0 3px; }
+.ml-fact { padding: 2px 4px; border-radius: 4px; }
+.ml-fact:hover { background-color: alpha(@foreground, 0.05); }
+button.ml-chip { background: none; box-shadow: none; border: 1px solid transparent; border-radius: 6px;
+    padding: 1px 7px; min-height: 0; color: @foreground; }
 button.ml-chip:hover { background-color: @primary; border-color: @primary; color: @on_primary; }
 window.ml button.ml-chip:hover label { color: @on_primary; }
 window.ml button.ml-chip .ml-meta { font-size: 11px; }
